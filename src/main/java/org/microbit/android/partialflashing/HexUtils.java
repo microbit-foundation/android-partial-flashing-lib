@@ -1,4 +1,4 @@
-package org.microbit.android.hexutils
+package org.microbit.android.partialflashing;
 
 import android.util.Log;
 
@@ -9,6 +9,12 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.InterruptedIOException;
+
+import java.util.*;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Iterator;
+
 
 /**
  * Created by Sam Kent on 01/11/2017.
@@ -50,8 +56,12 @@ public class HexUtils {
     public void HexUtils(String filePath){
         // Hex Utils initialization
         // Open File
-        if(!openHexFile(filePath)){
-                status = INVALID_FILE;
+        try {
+          if(!openHexFile(filePath)){
+                  status = INVALID_FILE;
+          }
+        } catch(Exception e) {
+          Log.e(TAG, "Error opening file: " + e);
         }
     }
 
@@ -72,8 +82,8 @@ public class HexUtils {
 
         // Create reader for hex file
         reader = new BufferedReader(new InputStreamReader(fis));
-
-        while((String line = reader.readLine()) != null) {
+        String line;
+        while((line = reader.readLine()) != null) {
             hexLines.add(line);
         }
         reader.close();
@@ -82,13 +92,13 @@ public class HexUtils {
 
     public int searchForData(String search) throws IOException {
         // Iterate through
-        Iterator i = hexLines.iterator();
+        ListIterator i = hexLines.listIterator();
         while (i.hasNext()) {
             // Have to call nextIndex() before next()
             int index = i.nextIndex();
 
             // Return index if successful
-            if(i.next().contains(search)){ return index; }
+            if(i.next().toString().contains(search)){ return index; }
         }
 
         // Return -1 if no match
@@ -100,11 +110,11 @@ public class HexUtils {
     }
 
     public int getRecordTypeFromIndex(int index) throws IOException {
-            return getRecordType(hexLines.get(index);
+            return getRecordType(hexLines.get(index));
     }
 
     public int getRecordAddressFromIndex(int index) throws IOException {
-            return getRecordOffset(hexLines.get(index));
+            return getRecordAddress(hexLines.get(index));
     }
 
     public int getSegmentAddress(int index) throws IOException {
@@ -251,7 +261,7 @@ public class HexUtils {
     Find HEX Meta Data
      */
     public Boolean findHexMetaData(String filePath) throws IOException {
-
+      return false;
     }
 
     /*
@@ -264,10 +274,6 @@ public class HexUtils {
     /*
     Get offset of current record
      */
-    public int getRecordOffset(){
-        return currentRecordOffset;
-    }
-    
     public int getRecordOffset(){
         return currentRecordOffset;
     }
