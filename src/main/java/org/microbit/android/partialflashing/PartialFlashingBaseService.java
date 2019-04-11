@@ -40,8 +40,12 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     public static final UUID PARTIAL_FLASH_CHARACTERISTIC = UUID.fromString("e97d3b10-251d-470a-a062-fa1922dfa9a8");
     public static final UUID PARTIAL_FLASHING_SERVICE = UUID.fromString("e97dd91d-251d-470a-a062-fa1922dfa9a8");
+    
+    public static final String PXT_MAGIC = "708E3B92C615A841C49866C975EE5197";
 
     private final static String TAG = PartialFlashingBaseService.class.getSimpleName();
+    
+    public static final String BROADCAST_ACTION = "org.microbit.android.partialflashing.broadcast.BROADCAST_ACTION";
 
     private BluetoothManager mBluetoothManager;
     private BluetoothAdapter mBluetoothAdapter;
@@ -94,7 +98,13 @@ public abstract class PartialFlashingBaseService extends IntentService {
             "com.example.bluetooth.le.ACTION_DATA_AVAILABLE";
     public final static String EXTRA_DATA =
             "com.example.bluetooth.le.EXTRA_DATA";
-    LocalBroadcastManager localBroadcast;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+
+        final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
+    }
 
     // Various callback methods defined by the BLE API.
     private final BluetoothGattCallback mGattCallback =
@@ -228,32 +238,33 @@ public abstract class PartialFlashingBaseService extends IntentService {
         int count = 0;
         int progressBar = 0;
         int numOfLines = 0;
-        HexUtils hex;
         try {
-            hex = new HexUtils();
-            if (hex.findHexMetaData(filePath)) {
 
-                if(!hex.getTemplateHash().equals(dalHash)){
-                    Log.v(TAG, "Received DAL hash:" + dalHash + "   Template: " +  hex.getTemplateHash());
-                }
+            Log.v(TAG, "starting pf");
 
-                numOfLines = hex.numOfLines(filePath);
-                numOfLines = numOfLines - hex.getMagicLines();
+            HexUtils hex = new HexUtils(filePath);
+            int magicIndex = hex.searchForData(PXT_MAGIC);
+            if (magicIndex > -1) {
+                
+                Log.v(TAG, "found meta");
+
+                numOfLines = hex.numOfLines() - magicIndex;
                 Log.v(TAG, "Total lines: " + numOfLines);
 
                 // Ready to flash!
                 // Loop through data
                 String hexData;
                 int packetNum = 0;
+                int lineCount = 0;
                 while(true){
                     // Get next data to write
-                    hexData = hex.getNextData();
+                    hexData = hex.getDataFromIndex(magicIndex + lineCount);
                     // Check if EOF
-                    if(hex.getRecordType() != 0) break;
+                    if(hex.getRecordTypeFromIndex(magicIndex + lineCount) != 0) break;
 
                     // Log record being written
                     Log.v(TAG, "Hex Data  : " + hexData);
-                    Log.v(TAG, "Hex Offset: " + Integer.toHexString(hex.getRecordOffset()));
+                    Log.v(TAG, "Hex Offset: " + Integer.toHexString(hex.getRecordAddressFromIndex(magicIndex + lineCount)));
 
                     // If Hex Data is Embedded Source Magic
                     if(hexData.length() == 32) {
@@ -273,11 +284,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     // Split into bytes
                     int offsetToSend = 0;
                     if(count == 0) {
-                        offsetToSend = hex.getRecordOffset();
+                        offsetToSend = hex.getRecordAddressFromIndex(magicIndex + lineCount);
                     }
 
                     if(count == 1) {
-                        offsetToSend = hex.getSectionAddress();
+                        offsetToSend = hex.getSegmentAddress(magicIndex + lineCount);
                     }
 
                     Log.v(TAG, "OFFSET_TO_SEND: " + offsetToSend);
@@ -306,14 +317,14 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     // If notification is retransmit -> retransmit last block.
                     // Else set start of new block
                     if(packetState == PACKET_STATE_RETRANSMIT) {
-                        hex.rewind();
+                        lineCount = lineCount - 4;
                     } else {
-                        hex.setMark();
                         // TODO update UI
                     }
 
                     // Increment packet #
                     packetNum = packetNum + 1;
+                    lineCount = lineCount + 1;
 
                 }
 
@@ -415,10 +426,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         BluetoothGattDescriptor descriptor = partialFlashCharacteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG);
         descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
 
-        if(bluetoothStatus) {
-            bluetoothStatus = BLE_WAITING;
-            mBluetoothGatt.writeDescriptor(descriptor);
-        }
+        bluetoothStatus = BLE_WAITING;
+        mBluetoothGatt.writeDescriptor(descriptor);
         while(!bluetoothStatus);
 
         return true;
@@ -431,7 +440,9 @@ public abstract class PartialFlashingBaseService extends IntentService {
         final String filePath = intent.getStringExtra("filepath");
         final String deviceAddress = intent.getStringExtra("deviceAddress");
 
+        Log.v(TAG, "Initialise");
         initialize(deviceAddress);
+        Log.v(TAG, "/Initialise");
         readMemoryMap();
         // If fails attempt full flash
         if(!attemptPartialFlash(filePath))

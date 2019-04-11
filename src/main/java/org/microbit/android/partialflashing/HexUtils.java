@@ -50,10 +50,7 @@ public class HexUtils {
 
     int magicLines = 0;
 
-    /*
-     Unused initializer
-     */
-    public void HexUtils(String filePath){
+    public HexUtils(String filePath){
         // Hex Utils initialization
         // Open File
         try {
@@ -88,6 +85,10 @@ public class HexUtils {
         }
         reader.close();
         return true;
+    }
+
+    public int numOfLines() {
+            return hexLines.size();
     }
 
     public int searchForData(String search) throws IOException {
