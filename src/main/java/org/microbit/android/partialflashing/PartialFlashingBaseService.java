@@ -102,8 +102,12 @@ public abstract class PartialFlashingBaseService extends IntentService {
     @Override
     public void onCreate() {
         super.onCreate();
+        
+        final IntentFilter intentFilter = new IntentFilter();                           
+        intentFilter.addAction(PartialFlashingBaseService.BROADCAST_ACTION);                       
 
         final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
+        manager.registerReceiver(broadcastReceiver, intentFilter);
     }
 
     // Various callback methods defined by the BLE API.
@@ -220,6 +224,27 @@ public abstract class PartialFlashingBaseService extends IntentService {
       super(TAG);
     }
 
+    public static final String BROADCAST_PROGRESS = "org.microbit.android.partialflashing.broadcast.BROADCAST_PROGRESS";
+    public static final String EXTRA_PROGRESS = "org.microbit.android.partialflashing.extra.EXTRA_PROGRESS";
+    
+    private void sendProgressBroadcast(final int progress) {
+
+        Log.v(TAG, "Sending progress broadcast: " + progress + "%");
+
+        final Intent broadcast = new Intent(BROADCAST_PROGRESS);
+        broadcast.putExtra(EXTRA_PROGRESS, progress);
+
+        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+    }
+
+//    private void sendErrorBroadcast(final int error) {
+//
+//       final Intent broadcast = new Intent(BROADCAST_ERROR);
+//
+//        broadcast.putExtra(EXTRA_DEVICE_ADDRESS, mDeviceAddress);
+//        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+//    }
+
     // Write to BLE Flash Characteristic
     public Boolean writePartialFlash(byte data[]){
 
@@ -319,7 +344,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     if(packetState == PACKET_STATE_RETRANSMIT) {
                         lineCount = lineCount - 4;
                     } else {
-                        // TODO update UI
+                        // send progress update
+                        Log.v(TAG, "LC: " + lineCount + ", NL: " + numOfLines);
+                        int percent = Math.round((float)100 * ((float)(lineCount) / (float)(numOfLines)));
+                        sendProgressBroadcast(percent);
                     }
 
                     // Increment packet #
@@ -334,6 +362,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
                 // Finished Writing
                 Log.v(TAG, "Flash Complete");
+                sendProgressBroadcast(100);
 
                 // Time execution
                 long endTime = SystemClock.elapsedRealtime();
