@@ -27,8 +27,6 @@ import java.util.Iterator;
 public class HexUtils {
     private final static String TAG = HexUtils.class.getSimpleName();
         
-    private final static String PXT_MAGIC = "708E3B92C615A841C49866C975EE5197";
-
     private final static int INIT = 0;
     private final static int INVALID_FILE = 1;
     private final static int NO_PARTIAL_FLASH = 2;
@@ -37,18 +35,6 @@ public class HexUtils {
     FileInputStream fis = null;
     BufferedReader reader = null;
     List<String> hexLines = new ArrayList<String>();
-
-    int BUFFER_LIMIT = 10000;
-
-    String templateHash;
-    String programHash;
-    int sectionAddress;
-    int magicAddress;
-
-    int currentRecordType   = 0;
-    int currentRecordOffset = 0;
-
-    int magicLines = 0;
 
     public HexUtils(String filePath){
         // Hex Utils initialization
@@ -87,10 +73,20 @@ public class HexUtils {
         return true;
     }
 
+    /* 
+     * A function to find the length of the hex file
+     * @param none
+     * @ return the size (# of lines) in the hex file
+     */
     public int numOfLines() {
             return hexLines.size();
     }
-
+    
+    /* 
+     * A function to search for data in a hex file
+     * @param the _string_ of data to search for
+     * @return the index of the data. -1 if not found.
+     */
     public int searchForData(String search) throws IOException {
         // Iterate through
         ListIterator i = hexLines.listIterator();
@@ -105,19 +101,40 @@ public class HexUtils {
         // Return -1 if no match
         return -1;
     }
-
+    
+    /*
+     * Returns data from an index
+     * @param index
+     * @return data as string
+     */
     public String getDataFromIndex(int index) throws IOException {
             return getRecordData(hexLines.get(index)); 
     }
 
+    /*
+     * Returns record type from an index
+     * @param index
+     * @return type as int
+     */
     public int getRecordTypeFromIndex(int index) throws IOException {
             return getRecordType(hexLines.get(index));
     }
 
+    /*
+     * Returns record address from an index
+     * Note: does not include segment address
+     * @param index
+     * @return address as int
+     */
     public int getRecordAddressFromIndex(int index) throws IOException {
             return getRecordAddress(hexLines.get(index));
     }
 
+    /*
+     * Returns segment address from an index
+     * @param index
+     * @return address as int
+     */
     public int getSegmentAddress(int index) throws IOException {
             // Look backwards to find current segment address
             int segmentAddress = -1;
@@ -130,46 +147,6 @@ public class HexUtils {
 
             // Return segment address
             return Integer.parseInt(getRecordData(hexLines.get(cur)), 16);
-    }
-
-    public Boolean findMagic(String magic) throws IOException {
-        String record;
-
-        try {
-            while ((record = reader.readLine()) != null) {
-                // Inc magic lines
-                magicLines++;
-
-                // Record Type
-                switch(getRecordType(record)) {
-                    case 0: // Data
-                        // Once the magic happens..
-                        if(getRecordData(record).equals(magic)){
-                            // Store Magic Address and Break
-                            magicAddress = sectionAddress + getRecordAddress(record);
-                            Log.v(TAG, "Magic Found!");
-                            return true;
-                        }
-                        break;
-                    case 1: // If record type is EOF break the loop
-                        return false;
-                    case 4:
-                        // Recent Section
-                        sectionAddress = Integer.parseInt(getRecordData(record), 16);
-                        break;
-                }
-
-                // Set mark to Magic record -1
-                reader.mark(BUFFER_LIMIT);
-
-            }
-        } catch (Exception e){
-            Log.e(TAG, "Find Magic " + e.toString());
-        }
-
-        // If magic is never found and there is no EOF file marker
-        // Should never return here
-        return false;
     }
 
     /*
@@ -209,14 +186,6 @@ public class HexUtils {
     }
 
     /*
-    Used to get the record type from the current record if it exists
-    @return Record type as a decimal
-    */
-    public int getRecordType(){
-        return currentRecordType;
-    }
-
-    /*
     Used to get the data from a record
     @param Record as a String
     @return Data
@@ -232,68 +201,6 @@ public class HexUtils {
     }
 
     /*
-    Used to return the data from the next record
-     */
-    public String getNextData() throws IOException {
-        String data = reader.readLine();
-        currentRecordType = getRecordType(data);
-        currentRecordOffset = getRecordAddress(data);
-        return getRecordData(data);
-    }
-
-    // Specific Functions Used For Partial Flashing Below
-    /*
-    Returns the template hash
-    @return templateHash
-     */
-    public String getTemplateHash(){
-        return templateHash;
-    }
-
-    /*
-    Returns the program hash
-    @return programHash
-     */
-    public String getProgramHash(){
-        return programHash;
-    }
-
-    /*
-    Find HEX Meta Data
-     */
-    public Boolean findHexMetaData(String filePath) throws IOException {
-      return false;
-    }
-
-    /*
-    Find start address & start of PXT data
-     */
-    public Integer getSectionAddress(){
-        return sectionAddress;
-    }
-
-    /*
-    Get offset of current record
-     */
-    public int getRecordOffset(){
-        return currentRecordOffset;
-    }
-
-    /*
-    Set mark to beginning of page
-     */
-    public void setMark() throws IOException {
-        reader.mark(BUFFER_LIMIT);
-    }
-
-    /*
-    Rewind to start of page
-     */
-    public void rewind() throws IOException {
-        reader.reset();
-    }
-
-    /*
     Number of lines / packets in file
      */
     public int numOfLines(String filePath) throws IOException {
@@ -304,12 +211,5 @@ public class HexUtils {
         return lines;
     }
 
-    /*
-    Lines / packets before magic
-     */
-    public int getMagicLines()
-    {
-        return magicLines;
-    }
 }
 

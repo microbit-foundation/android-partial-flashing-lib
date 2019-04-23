@@ -62,6 +62,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final byte PACKET_STATE_RETRANSMIT = (byte)0xAA;
     private byte packetState = PACKET_STATE_WAITING;
 
+    // Used to lock the program state while we wait for a Bluetooth operation to complete
     private static final boolean BLE_WAITING = false;
     private static final boolean BLE_READY = true;
     private boolean bluetoothStatus = BLE_WAITING;
@@ -102,10 +103,13 @@ public abstract class PartialFlashingBaseService extends IntentService {
     @Override
     public void onCreate() {
         super.onCreate();
+
+        // Create intent filter and add to Local Broadcast Manager so that we can use an Intent to 
+        // start the Partial Flashing Service
         
         final IntentFilter intentFilter = new IntentFilter();                           
         intentFilter.addAction(PartialFlashingBaseService.BROADCAST_ACTION);                       
-
+        
         final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
         manager.registerReceiver(broadcastReceiver, intentFilter);
     }
@@ -237,14 +241,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
     }
 
-//    private void sendErrorBroadcast(final int error) {
-//
-//       final Intent broadcast = new Intent(BROADCAST_ERROR);
-//
-//        broadcast.putExtra(EXTRA_DEVICE_ADDRESS, mDeviceAddress);
-//        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
-//    }
-
     // Write to BLE Flash Characteristic
     public Boolean writePartialFlash(byte data[]){
 
@@ -265,13 +261,13 @@ public abstract class PartialFlashingBaseService extends IntentService {
         int numOfLines = 0;
         try {
 
-            Log.v(TAG, "starting pf");
+            Log.v(TAG, "attemptPartialFlash()");
 
             HexUtils hex = new HexUtils(filePath);
             int magicIndex = hex.searchForData(PXT_MAGIC);
             if (magicIndex > -1) {
                 
-                Log.v(TAG, "found meta");
+                Log.v(TAG, "Found PXT_MAGIC");
 
                 numOfLines = hex.numOfLines() - magicIndex;
                 Log.v(TAG, "Total lines: " + numOfLines);
@@ -329,7 +325,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     if(count == 4){
                         count = 0;
                         // Wait for notification
-                        int waitTime = 0;
                         while(packetState == PACKET_STATE_WAITING);
 
                         // Reset to waiting state
@@ -344,15 +339,17 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     if(packetState == PACKET_STATE_RETRANSMIT) {
                         lineCount = lineCount - 4;
                     } else {
-                        // send progress update
+                        // Send progress update
                         Log.v(TAG, "LC: " + lineCount + ", NL: " + numOfLines);
                         int percent = Math.round((float)100 * ((float)(lineCount) / (float)(numOfLines)));
                         sendProgressBroadcast(percent);
+                        
+                        // Next line
+                        lineCount = lineCount + 1;
                     }
 
                     // Increment packet #
                     packetNum = packetNum + 1;
-                    lineCount = lineCount + 1;
 
                 }
 
