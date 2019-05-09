@@ -204,7 +204,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
                             break;
                         }
                         case FLASH_COMMAND: {
-                            Log.v(TAG, "Packet Acknowledged: " + notificationValue[1]);
                             packetState = notificationValue[1];
                         }
                     }
@@ -283,25 +282,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     // Check if EOF
                     if(hex.getRecordTypeFromIndex(magicIndex + lineCount) != 0) break;
 
-                    // Log record being written
-                    Log.v(TAG, "Hex Data  : " + hexData);
-                    Log.v(TAG, "Hex Offset: " + Integer.toHexString(hex.getRecordAddressFromIndex(magicIndex + lineCount)));
-
-                    // If Hex Data is Embedded Source Magic
-                    if(hexData.length() == 32) {
-                        if (hexData.substring(0, 15).equals("41140E2FB82FA2B"))
-                        {
-                            // Start of embedded source
-                            Log.v(TAG, "Reached embedded source");
-                            // Time execution
-                            long endTime = SystemClock.elapsedRealtime();
-                            long elapsedMilliSeconds = endTime - startTime;
-                            double elapsedSeconds = elapsedMilliSeconds / 1000.0;
-                            Log.v(TAG, "Flash Time (No Embedded Source): " + Float.toString((float) elapsedSeconds) + " seconds");
-                            break;
-                        }
-                    }
-
                     // Split into bytes
                     int offsetToSend = 0;
                     if(count == 0) {
@@ -312,26 +292,32 @@ public abstract class PartialFlashingBaseService extends IntentService {
                         offsetToSend = hex.getSegmentAddress(magicIndex + lineCount);
                     }
 
-                    Log.v(TAG, "OFFSET_TO_SEND: " + offsetToSend);
                     byte chunk[] = recordToByteArray(hexData, offsetToSend, packetNum);
 
                     // Write without response
                     // Wait for previous write to complete
                     boolean writeStatus = writePartialFlash(chunk);
-                    Log.v(TAG, "Hex Write: " + Boolean.toString(writeStatus));
 
                     // Sleep after 4 packets
                     count++;
                     if(count == 4){
                         count = 0;
+                        
                         // Wait for notification
+                        Log.v(TAG, "Wait for notification");
+                        
+                        // Send broadcast while waiting
+                        int percent = Math.round((float)100 * ((float)(lineCount) / (float)(numOfLines)));
+                        sendProgressBroadcast(percent);
+
                         while(packetState == PACKET_STATE_WAITING);
+                        Log.v(TAG, "/Wait for notification");
 
                         // Reset to waiting state
                         packetState = PACKET_STATE_WAITING;
 
                     } else {
-                        Thread.sleep(5);
+                        Thread.sleep(3);
                     }
 
                     // If notification is retransmit -> retransmit last block.
@@ -339,16 +325,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     if(packetState == PACKET_STATE_RETRANSMIT) {
                         lineCount = lineCount - 4;
                     } else {
-                        // Send progress update
-                        Log.v(TAG, "LC: " + lineCount + ", NL: " + numOfLines);
-                        int percent = Math.round((float)100 * ((float)(lineCount) / (float)(numOfLines)));
-                        sendProgressBroadcast(percent);
-                        
                         // Next line
                         lineCount = lineCount + 1;
                     }
 
-                    // Increment packet #
+                    // Always increment packet #
                     packetNum = packetNum + 1;
 
                 }
@@ -447,6 +428,13 @@ public abstract class PartialFlashingBaseService extends IntentService {
             Log.e(TAG, "Failed to set up notifications");
         } else {
             Log.v(TAG, "Notifications enabled");
+        }
+
+        // Set up BLE priority
+        if(mBluetoothGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)){
+            Log.e(TAG, "Failed to set up priority");
+        } else {
+            Log.v(TAG, "High priority");
         }
 
         BluetoothGattDescriptor descriptor = partialFlashCharacteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG);
