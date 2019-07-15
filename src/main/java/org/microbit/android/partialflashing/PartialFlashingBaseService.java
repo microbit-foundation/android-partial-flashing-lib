@@ -290,7 +290,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 
                 // Find DAL hash
                 String hashes = hex.getDataFromIndex(magicIndex + 1);
-                if!(hashes.substring(0, 8).equals(dalHash)) {
+                if(!hashes.substring(0, 8).equals(dalHash)) {
                         return false;
                 }
 
