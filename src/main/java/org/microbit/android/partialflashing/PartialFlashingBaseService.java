@@ -228,6 +228,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
     }
 
     public static final String BROADCAST_PROGRESS = "org.microbit.android.partialflashing.broadcast.BROADCAST_PROGRESS";
+    public static final String BROADCAST_START = "org.microbit.android.partialflashing.broadcast.BROADCAST_START";
+    public static final String BROADCAST_COMPLETE = "org.microbit.android.partialflashing.broadcast.BROADCAST_COMPLETE";
     public static final String EXTRA_PROGRESS = "org.microbit.android.partialflashing.extra.EXTRA_PROGRESS";
     
     private void sendProgressBroadcast(final int progress) {
@@ -236,6 +238,24 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         final Intent broadcast = new Intent(BROADCAST_PROGRESS);
         broadcast.putExtra(EXTRA_PROGRESS, progress);
+
+        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+    }
+    
+    private void sendProgressBroadcastStart() {
+
+        Log.v(TAG, "Sending progress broadcast start");
+
+        final Intent broadcast = new Intent(BROADCAST_START);
+
+        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+    }
+    
+    private void sendProgressBroadcastComplete() {
+
+        Log.v(TAG, "Sending progress broadcast complete");
+
+        final Intent broadcast = new Intent(BROADCAST_COMPLETE);
 
         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
     }
@@ -267,6 +287,12 @@ public abstract class PartialFlashingBaseService extends IntentService {
             if (magicIndex > -1) {
                 
                 Log.v(TAG, "Found PXT_MAGIC");
+                
+                // Find DAL hash
+                String hashes = hex.getDataFromIndex(magicIndex + 1);
+                if!(hashes.substring(0, 8).equals(dalHash)) {
+                        return false;
+                }
 
                 numOfLines = hex.numOfLines() - magicIndex;
                 Log.v(TAG, "Total lines: " + numOfLines);
@@ -446,6 +472,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         return true;
     }
+    
+    public static final String BROADCAST_PF_FAILED = "org.microbit.android.partialflashing.broadcast.BROADCAST_PF_FAILED";
 
     @Override
     protected void onHandleIntent(@Nullable Intent intent) {
@@ -462,9 +490,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
         if(!attemptPartialFlash(filePath))
         {
             Log.v(TAG, "Partial Flashing not possible");
+
+            final Intent broadcast = new Intent(BROADCAST_PF_FAILED);
+
+            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
         }
-
-
     }
 
     /*
