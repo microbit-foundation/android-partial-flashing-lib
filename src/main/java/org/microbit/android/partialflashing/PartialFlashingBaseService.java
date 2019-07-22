@@ -57,6 +57,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     BluetoothGattCharacteristic partialFlashCharacteristic;
 
+    private final Object lock = new Object();
+
     private static final byte PACKET_STATE_WAITING = 0;
     private static final byte PACKET_STATE_SENT = (byte)0xFF;
     private static final byte PACKET_STATE_RETRANSMIT = (byte)0xAA;
@@ -208,6 +210,9 @@ public abstract class PartialFlashingBaseService extends IntentService {
                         }
                     }
 
+                    synchronized (lock) {
+                        lock.notifyAll();
+                    }
                 }
 
                 @Override
@@ -290,7 +295,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 
                 // Find DAL hash
                 String hashes = hex.getDataFromIndex(magicIndex + 1);
-                if(!hashes.substring(0, 8).equals(dalHash)) {
+                if(!hashes.substring(0, 16).equals(dalHash)) {
+                        Log.v(TAG, hashes.substring(0, 16) + " " + (dalHash));
                         return false;
                 }
 
@@ -298,6 +304,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 Log.v(TAG, "Total lines: " + numOfLines);
 
                 // Ready to flash!
+                sendProgressBroadcastStart();
                 // Loop through data
                 String hexData;
                 int packetNum = 0;
@@ -367,6 +374,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 // Finished Writing
                 Log.v(TAG, "Flash Complete");
                 sendProgressBroadcast(100);
+                sendProgressBroadcastComplete();
 
                 // Time execution
                 long endTime = SystemClock.elapsedRealtime();
@@ -514,7 +522,9 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 notificationReceived = false;
                 status = mBluetoothGatt.writeCharacteristic(partialFlashCharacteristic);
                 Log.v(TAG, "Request Region " + i);
-                while(!bluetoothStatus);
+                synchronized (lock) {
+                    lock.wait();
+                }
             }
 
 
@@ -545,6 +555,13 @@ public abstract class PartialFlashingBaseService extends IntentService {
             Log.v(TAG, "Received Broadcast: " + intent.toString());
         }
     };
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
+        manager.unregisterReceiver(broadcastReceiver);
+    }
     
     protected abstract Class<? extends Activity> getNotificationTarget();
 }
