@@ -51,9 +51,10 @@ An example that forwards the information to a React Native app:
 
 ```
 ...
-
-  public static final String BROADCAST_PROGRESS_PF = "org.microbit.android.partialflashing.broadcast.BROADCAST_PROGRESS";
-  public static final String EXTRA_PROGRESS_PF = "org.microbit.android.partialflashing.extra.EXTRA_PROGRESS";
+  public static final String BROADCAST_PROGRESS = "org.microbit.android.partialflashing.broadcast.BROADCAST_PROGRESS";
+  public static final String BROADCAST_START = "org.microbit.android.partialflashing.broadcast.BROADCAST_START";
+  public static final String BROADCAST_COMPLETE = "org.microbit.android.partialflashing.broadcast.BROADCAST_COMPLETE";
+  public static final String EXTRA_PROGRESS = "org.microbit.android.partialflashing.extra.EXTRA_PROGRESS";
 
   private ReactContext mReactContext;
   private LocalBroadcastReceiver  mLocalBroadcastReceiver;
