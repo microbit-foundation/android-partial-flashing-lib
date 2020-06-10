@@ -350,7 +350,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                         offsetToSend = hex.getSegmentAddress(magicIndex + lineCount);
                     }
 
-                    byte chunk[] = recordToByteArray(hexData, offsetToSend, packetNum);
+                    byte chunk[] = HexUtils.recordToByteArray(hexData, offsetToSend, packetNum);
 
                     // Write without response
                     // Wait for previous write to complete
@@ -426,30 +426,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
 
         return PF_SUCCESS;
-    }
-
-    /*
-    Record to byte Array
-    @param hexString string to convert
-    @return byteArray of hex
-     */
-    private static byte[] recordToByteArray(String hexString, int offset, int packetNum){
-        int len = hexString.length();
-        byte[] data = new byte[(len/2) + 4];
-        for(int i=0; i < len; i+=2){
-            data[(i / 2) + 4] = (byte) ((Character.digit(hexString.charAt(i), 16) << 4) + Character.digit(hexString.charAt(i+1), 16));
-        }
-
-        // WRITE Command
-        data[0] = 0x01;
-
-        data[1]   = (byte)(offset >> 8);
-        data[2] = (byte)(offset & 0xFF);
-        data[3] = (byte)(packetNum & 0xFF);
-
-        Log.v(TAG, "Sent: " + data.toString());
-
-        return data;
     }
 
     /**
