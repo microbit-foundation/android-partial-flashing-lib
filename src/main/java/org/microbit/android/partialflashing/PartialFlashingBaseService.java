@@ -92,6 +92,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
     // Regions
     String[] regions = {"SoftDevice", "DAL", "MakeCode"};
 
+    // Partial Flashing Return Vals
+    private static final int PF_SUCCESS = 0x0;
+    private static final int PF_ATTEMPT_DFU = 0x1;
+    private static final int PF_FAILED = 0x2;
+
     public final static String ACTION_GATT_CONNECTED =
             "com.example.bluetooth.le.ACTION_GATT_CONNECTED";
     public final static String ACTION_GATT_DISCONNECTED =
@@ -289,8 +294,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     }
 
-
-    public Boolean attemptPartialFlash(String filePath) {
+    public int attemptPartialFlash(String filePath) {
         Log.v(TAG, "Flashing: " + filePath);
         long startTime = SystemClock.elapsedRealtime();
 
@@ -312,7 +316,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 String hashes = hex.getDataFromIndex(magicIndex + 1);
                 if(!hashes.substring(0, 16).equals(dalHash)) {
                         Log.v(TAG, hashes.substring(0, 16) + " " + (dalHash));
-                        return false;
+                        return PF_ATTEMPT_DFU;
                 }
 
                 numOfLines = hex.numOfLines() - magicIndex;
@@ -326,7 +330,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 int lineCount = 0;
                 while(true){
                     // Timeout if total is > 60 seconds
-                    if(SystemClock.elapsedRealtime() - startTime > 60000) return false;
+                    if(SystemClock.elapsedRealtime() - startTime > 60000) return PF_FAILED;
 
                     // Get next data to write
                     hexData = hex.getDataFromIndex(magicIndex + lineCount);
@@ -371,7 +375,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                             }
 
                             // Timeout if longer than 5 seconds
-                            if((SystemClock.elapsedRealtime() - timeout) > 5000) return false;
+                            if((SystemClock.elapsedRealtime() - timeout) > 5000) return PF_FAILED;
                         }
 
                         packetState = PACKET_STATE_WAITING;
@@ -421,7 +425,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
         }
 
 
-        return true;
+        return PF_SUCCESS;
     }
 
     /*
@@ -535,7 +539,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         Log.v(TAG, "/Initialise");
         readMemoryMap();
         // If fails attempt full flash
-        if(!attemptPartialFlash(filePath) || Service == null)
+        int pf_result = attemptPartialFlash(filePath);
+        if((pf_result == PF_ATTEMPT_DFU) || Service == null)
         {
             Log.v(TAG, "Partial Flashing not possible");
 
@@ -567,7 +572,12 @@ public abstract class PartialFlashingBaseService extends IntentService {
             final Intent broadcast = new Intent(BROADCAST_PF_FAILED);
 
             LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+        } else if(pf_result == PF_FAILED) {
+            // Partial flashing started but failed. Need to PF or USB flash to fix
+            final Intent broadcast = new Intent(BROADCAST_PF_FAILED);
+            startActivity(broadcast);
         }
+
         Log.v(TAG, "onHandleIntent End");
     }
 
