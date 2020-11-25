@@ -3,17 +3,13 @@ package org.microbit.android.partialflashing;
 import android.util.Log;
 
 import java.io.BufferedReader;
-import java.io.EOFException;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.InterruptedIOException;
-
-import java.util.*;
-import java.util.List;
 import java.util.ArrayList;
-import java.util.Iterator;
+import java.util.List;
+import java.util.ListIterator;
 
 
 /**
@@ -128,6 +124,15 @@ public class HexUtils {
      */
     public int getRecordAddressFromIndex(int index) throws IOException {
             return getRecordAddress(hexLines.get(index));
+    }
+
+    /*
+    Used to get the data length from a record
+    @param Record as a String
+    @return Data length as a decimal / # of chars
+ */
+    public int getRecordDataLengthFromIndex(int index){
+        return getRecordDataLength(hexLines.get(index));
     }
 
     /*

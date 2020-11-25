@@ -15,9 +15,11 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Build;
 import android.os.SystemClock;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
@@ -25,8 +27,6 @@ import java.io.IOException;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.UUID;
-
-import static android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE;
 
 /**
  * A class to communicate with and flash the micro:bit without having to transfer the entire HEX file
@@ -43,6 +43,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
     public static final String PXT_MAGIC = "708E3B92C615A841C49866C975EE5197";
 
     private static final UUID MICROBIT_DFU_SERVICE = UUID.fromString("e95d93b0-251d-470a-a062-fa1922dfa9a8");
+    private static final UUID MICROBIT_SECURE_DFU_SERVICE = UUID.fromString("0000fe59-0000-1000-8000-00805f9b34fb");
     private static final UUID MICROBIT_DFU_CHARACTERISTIC = UUID.fromString("e95d93b1-251d-470a-a062-fa1922dfa9a8");
 
     private final static String TAG = PartialFlashingBaseService.class.getSimpleName();
@@ -55,6 +56,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private BluetoothGatt mBluetoothGatt;
     private int mConnectionState = STATE_DISCONNECTED;
     private BluetoothDevice device;
+    private boolean descriptorWriteSuccess = false;
+
+    BluetoothGattService pfService;
+    BluetoothGattCharacteristic partialFlashCharacteristic;
 
     private final Object lock = new Object();
     private final Object region_lock = new Object();
@@ -73,6 +78,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final int STATE_DISCONNECTED = 0;
     private static final int STATE_CONNECTING = 1;
     private static final int STATE_CONNECTED = 2;
+    private static final int STATE_CONNECTED_AND_READY = 3;
+    private static final int STATE_ERROR = 4;
 
     private static final UUID CLIENT_CHARACTERISTIC_CONFIG = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
@@ -91,6 +98,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     // Regions
     String[] regions = {"SoftDevice", "DAL", "MakeCode"};
+
+    // Microbit Type
+    private final int MICROBIT_V1 = 1;
+    private final int MICROBIT_V2 = 2;
+    int hardwareType = MICROBIT_V1;
 
     // Partial Flashing Return Vals
     private static final int PF_SUCCESS = 0x0;
@@ -120,6 +132,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         
         final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
         manager.registerReceiver(broadcastReceiver, intentFilter);
+
+        initialize();
     }
 
     // Various callback methods defined by the BLE API.
@@ -130,17 +144,46 @@ public abstract class PartialFlashingBaseService extends IntentService {
                                                     int newState) {
                     String intentAction;
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
-                        intentAction = ACTION_GATT_CONNECTED;
-                        mConnectionState = STATE_CONNECTED;
-                        Log.i(TAG, "Connected to GATT server.");
-                        Log.i(TAG, "Attempting to start service discovery:" +
-                                gatt.discoverServices());
 
+                        final boolean success = gatt.discoverServices();
+                        mConnectionState = STATE_CONNECTED;
+
+                        /* Taken from Nordic. See reasoning here: https://github.com/NordicSemiconductor/Android-DFU-Library/blob/e0ab213a369982ae9cf452b55783ba0bdc5a7916/dfu/src/main/java/no/nordicsemi/android/dfu/DfuBaseService.java#L888 */
+                        if (gatt.getDevice().getBondState() == BluetoothDevice.BOND_BONDED) {
+                            Log.v(TAG, "Already bonded");
+                            synchronized (lock) {
+                                try {
+                                    lock.wait(1600);
+
+                                } catch (InterruptedException e) {
+                                    e.printStackTrace();
+                                }
+                                Log.v(TAG, "Bond timeout");
+                            }
+                            // After 1.6s the services are already discovered so the following gatt.discoverServices() finishes almost immediately.
+                            // NOTE: This also works with shorted waiting time. The gatt.discoverServices() must be called after the indication is received which is
+                            // about 600ms after establishing connection. Values 600 - 1600ms should be OK.
+                        }
+                        gatt.discoverServices();
+
+                        if (!success) {
+                            Log.e(TAG,"ERROR_SERVICE_DISCOVERY_NOT_STARTED");
+                            mConnectionState = STATE_ERROR;
+                        } else {
+                            // Wait for service discovery to clear lock
+                            return;
+                        }
                     } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                         intentAction = ACTION_GATT_DISCONNECTED;
                         mConnectionState = STATE_DISCONNECTED;
                         Log.i(TAG, "Disconnected from GATT server.");
                     }
+
+                    // Clear any locks
+                    synchronized (lock) {
+                        lock.notifyAll();
+                    }
+
                 }
 
                 @Override
@@ -148,12 +191,19 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 public void onServicesDiscovered(BluetoothGatt gatt, int status) {
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         Log.w(TAG, "onServicesDiscovered SUCCESS");
+
+                        Log.v(TAG, String.valueOf(gatt.getServices()));
+                        mConnectionState = STATE_CONNECTED_AND_READY;
                     } else {
                         Log.w(TAG, "onServicesDiscovered received: " + status);
+                        mConnectionState = STATE_ERROR;
                     }
+
+                    // Clear locks
                     synchronized (lock) {
                         lock.notifyAll();
                     }
+                    Log.v(TAG, "Cleared locks");
                 }
 
                 @Override
@@ -228,11 +278,15 @@ public abstract class PartialFlashingBaseService extends IntentService {
                                         int status){
                     if(status == BluetoothGatt.GATT_SUCCESS) {
                         Log.v(TAG, "Descriptor success");
+                        Log.v(TAG, "GATT: " + gatt.toString() + ", Desc: " + descriptor.toString() + ", Status: " + status);
+                        descriptorWriteSuccess = true;
+                    } else {
+                        Log.v(TAG, "Descriptor write failed");
                     }
-                    Log.v(TAG, "GATT: " + gatt.toString() + ", Desc: " + descriptor.toString() + ", Status: " + status);
 
                     synchronized (lock) {
                         lock.notifyAll();
+                        Log.v(TAG, "onDescriptorWrite :: clear locks");
                     }
 
                 }
@@ -300,15 +354,31 @@ public abstract class PartialFlashingBaseService extends IntentService {
             Log.v(TAG, "attemptPartialFlash()");
             Log.v(TAG, filePath);
             HexUtils hex = new HexUtils(filePath);
+            Log.v(TAG, "searchForData()");
             int magicIndex = hex.searchForData(PXT_MAGIC);
+            Log.v(TAG, "/searchForData() = " + magicIndex);
             if (magicIndex > -1) {
                 
                 Log.v(TAG, "Found PXT_MAGIC");
+
+                // Get Memory Map from Microbit
+                try {
+                    Log.v(TAG, "readMemoryMap()");
+                    readMemoryMap();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
                 
                 // Find DAL hash
-                String hashes = hex.getDataFromIndex(magicIndex + 1);
-                if(!hashes.substring(0, 16).equals(dalHash)) {
-                        Log.v(TAG, hashes.substring(0, 16) + " " + (dalHash));
+                int record_length = hex.getRecordDataLengthFromIndex(magicIndex );
+                Log.v(TAG, "Length of record: " + record_length);
+
+                int magic_offset = (record_length == 64) ? 32 : 0;
+                String hashes = hex.getDataFromIndex(magicIndex + ((record_length == 64) ? 0 : 1)); // Size of rows
+                int chunks_per_line = magic_offset / 16;
+
+                if(!hashes.substring(magic_offset, magic_offset + 16).equals(dalHash)) {
+                        Log.v(TAG, hashes.substring(magic_offset, magic_offset + 16) + " " + (dalHash));
                         return PF_ATTEMPT_DFU;
                 }
 
@@ -321,9 +391,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 int packetNum = 0;
                 int lineCount = 0;
 
-                // Characteristic
-                BluetoothGattService pfService = mBluetoothGatt.getService(PARTIAL_FLASHING_SERVICE);
-                BluetoothGattCharacteristic partialFlashCharacteristic = pfService.getCharacteristic(PARTIAL_FLASH_CHARACTERISTIC);
+                Log.v(TAG, "enter flashing loop");
 
                 while(true){
                     // Timeout if total is > 30 seconds
@@ -383,7 +451,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                         Log.v(TAG, "/Wait for notification");
 
                     } else {
-                        Thread.sleep(3);
+                        Thread.sleep(5);
                     }
 
                     // If notification is retransmit -> retransmit last block.
@@ -418,6 +486,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 double elapsedSeconds = elapsedMilliSeconds / 1000.0;
                 Log.v(TAG, "Flash Time: " + Float.toString((float)elapsedSeconds) + " seconds");
 
+            } else {
+                return PF_ATTEMPT_DFU;
             }
         } catch (IOException e) {
             e.printStackTrace();
@@ -429,69 +499,56 @@ public abstract class PartialFlashingBaseService extends IntentService {
         return PF_SUCCESS;
     }
 
+    protected BluetoothGatt connect(@NonNull final String address) {
+        if (!mBluetoothAdapter.isEnabled())
+            return null;
+
+        mConnectionState = STATE_CONNECTING;
+
+        final BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(address);
+        BluetoothGatt gatt;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            gatt = device.connectGatt(this, false, mGattCallback,
+                    BluetoothDevice.TRANSPORT_LE,
+                    BluetoothDevice.PHY_LE_1M_MASK | BluetoothDevice.PHY_LE_2M_MASK);
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            gatt = device.connectGatt(this, false, mGattCallback,
+                    BluetoothDevice.TRANSPORT_LE);
+        } else {
+            gatt = device.connectGatt(this, false, mGattCallback);
+        }
+
+        // We have to wait until the device is connected and services are discovered
+        // Connection error may occur as well.
+        try {
+            synchronized (lock) {
+                while ((mConnectionState == STATE_CONNECTING || mConnectionState == STATE_CONNECTED))
+                    lock.wait();
+            }
+        } catch (final InterruptedException e) {
+        }
+
+        Log.v(TAG, "return gatt");
+
+        return gatt;
+    }
+
     /**
      * Initializes bluetooth adapter
      *
      * @return <code>true</code> if initialization was successful
      */
-    private boolean initialize(String deviceId) throws InterruptedException {
+    private boolean initialize() {
         // For API level 18 and above, get a reference to BluetoothAdapter through
         // BluetoothManager.
-        mBluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-        if (mBluetoothManager == null) {
-            Log.e(TAG, "Unable to initialize BluetoothManager.");
+        final BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        if (bluetoothManager == null) {
             return false;
         }
 
-        mBluetoothAdapter = mBluetoothManager.getAdapter();
+        mBluetoothAdapter = bluetoothManager.getAdapter();
         if (mBluetoothAdapter == null) {
-            Log.e(TAG, "Unable to obtain a BluetoothAdapter.");
             return false;
-        }
-
-        if (!mBluetoothAdapter.isEnabled())
-            return false;
-
-        Log.v(TAG,"Connecting to the device...");
-        if (device == null) {
-            device = mBluetoothAdapter.getRemoteDevice(deviceId);
-        }
-
-        mBluetoothGatt = device.connectGatt(this, true, mGattCallback);
-
-        //check mBluetoothGatt is available
-        if (mBluetoothGatt == null) {
-            Log.e(TAG, "lost connection");
-            return false;
-        }
-
-        synchronized (lock) {
-            lock.wait(2000);
-        }
-
-        // Get Characteristic
-        BluetoothGattService pfService = mBluetoothGatt.getService(PARTIAL_FLASHING_SERVICE);
-
-        if(pfService == null) {
-            // Probably not in pairing mode
-            return false;
-        }
-
-        BluetoothGattCharacteristic partialFlashCharacteristic = pfService.getCharacteristic(PARTIAL_FLASH_CHARACTERISTIC);
-
-        // Set up BLE notification
-        if(!mBluetoothGatt.setCharacteristicNotification(partialFlashCharacteristic, true)){
-            Log.e(TAG, "Failed to set up notifications");
-        } else {
-            Log.v(TAG, "Notifications enabled");
-        }
-
-        BluetoothGattDescriptor descriptor = partialFlashCharacteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG);
-        descriptor.setValue(ENABLE_NOTIFICATION_VALUE);
-        boolean res = mBluetoothGatt.writeDescriptor(descriptor);
-
-        synchronized (lock) {
-            lock.wait();
         }
 
         return true;
@@ -506,53 +563,108 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         final String filePath = intent.getStringExtra("filepath");
         final String deviceAddress = intent.getStringExtra("deviceAddress");
+        final int hardwareType = intent.getIntExtra("hardwareType", 1);
+        final boolean pf = intent.getBooleanExtra("pf", true);
 
-        Log.v(TAG, "Initialise");
-        boolean initialize_ret = false;
-        try {
-            initialize_ret = initialize(deviceAddress);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
+        mBluetoothGatt = connect(deviceAddress);
+
+        Log.v(TAG, mBluetoothGatt.toString());
+
+        if (mBluetoothGatt == null) {
+            final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+            return;
         }
-        Log.v(TAG, "/Initialise");
 
-        // If fails attempt full flash
-        if(!initialize_ret) {
-            // Partial flashing started but failed. Need to PF or USB flash to fix
+        // Check for partial flashing
+        pfService = mBluetoothGatt.getService(PARTIAL_FLASHING_SERVICE);
+
+        // Check partial flashing service exists
+        if(pfService == null) {
+            Log.v(TAG, "Partial Flashing Service == null");
             final Intent broadcast = new Intent(BROADCAST_PF_FAILED);
             LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
             return;
         }
 
-        // Get Memory Map from Microbit
-        try {
-            readMemoryMap();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
+        // Check for characteristic
+        partialFlashCharacteristic = pfService.getCharacteristic(PARTIAL_FLASH_CHARACTERISTIC);
+
+        if(partialFlashCharacteristic == null) {
+            final Intent broadcast = new Intent(BROADCAST_PF_FAILED);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
         }
-        int pf_result = attemptPartialFlash(filePath);
+
+        // Set up notifications
+        boolean res;
+        res = mBluetoothGatt.setCharacteristicNotification(partialFlashCharacteristic, true);
+        Log.v(TAG, "Set notifications: " + res);
+
+        BluetoothGattDescriptor descriptor = partialFlashCharacteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG);
+        descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+        res = mBluetoothGatt.writeDescriptor(descriptor);
+
+        // We have to wait until device receives a response or an error occur
+        try {
+            synchronized (lock) {
+                    lock.wait(2000);
+                     Log.v(TAG, String.valueOf(descriptor.getValue()));
+            }
+        } catch (final InterruptedException e) {
+        }
+
+        if(!descriptorWriteSuccess) {
+            final Intent broadcast = new Intent(BROADCAST_PF_FAILED);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+        }
+
+        /*
+        if(false) {
+            // Partial flashing started but failed. Need to PF or USB flash to fix
+            final Intent broadcast = new Intent(BROADCAST_PF_FAILED);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+            return;
+        }
+        */
+
+        int pf_result = PF_ATTEMPT_DFU;
+        if(pf) {
+            pf_result = attemptPartialFlash(filePath);
+        }
         if(pf_result == PF_ATTEMPT_DFU)
         {
-            Log.v(TAG, "Partial Flashing not possible");
-            BluetoothGattService dfuService = mBluetoothGatt.getService(MICROBIT_DFU_SERVICE);
-            // Write Characteristic to enter DFU mode
-            if(dfuService == null) {
-                Log.v(TAG, "DFU Service is null");
-                final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
-                LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
-                return;
-            }
-            BluetoothGattCharacteristic microbitDFUCharacteristic = dfuService.getCharacteristic(MICROBIT_DFU_CHARACTERISTIC);
-            byte payload[] = {0x01};
-            microbitDFUCharacteristic.setValue(payload);
-            boolean status = mBluetoothGatt.writeCharacteristic(microbitDFUCharacteristic);
-            Log.v(TAG, "MicroBitDFU :: Enter DFU Result " + status);
 
-            synchronized (lock) {
-                try {
-                    lock.wait();
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
+            Log.v(TAG, "Partial Flashing not possible");
+
+            // If v1 we need to switch the DFU mode
+            if(hardwareType == MICROBIT_V1) {
+                BluetoothGattService dfuService = mBluetoothGatt.getService(MICROBIT_DFU_SERVICE);
+                // Write Characteristic to enter DFU mode
+                if (dfuService == null) {
+                    Log.v(TAG, "DFU Service is null");
+                    final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
+                    LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+                    return;
+                }
+                BluetoothGattCharacteristic microbitDFUCharacteristic = dfuService.getCharacteristic(MICROBIT_DFU_CHARACTERISTIC);
+                byte payload[] = {0x01};
+                if (microbitDFUCharacteristic == null) {
+                    final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
+                    LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+                    return;
+                }
+                ;
+
+                microbitDFUCharacteristic.setValue(payload);
+                boolean status = mBluetoothGatt.writeCharacteristic(microbitDFUCharacteristic);
+                Log.v(TAG, "MicroBitDFU :: Enter DFU Result " + status);
+
+                synchronized (lock) {
+                    try {
+                        lock.wait(1000);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
                 }
             }
 
@@ -566,6 +678,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
             } catch (Exception e) {
                 // Log it
             }
+
+            mBluetoothGatt.disconnect();
 
             Log.v(TAG, "Send Intent: BROADCAST_PF_ATTEMPT_DFU");
             final Intent broadcast = new Intent(BROADCAST_PF_ATTEMPT_DFU);
@@ -593,21 +707,23 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private Boolean readMemoryMap() throws InterruptedException {
         boolean status; // Gatt Status
 
-        BluetoothGattService pfService = mBluetoothGatt.getService(PARTIAL_FLASHING_SERVICE);
-        BluetoothGattCharacteristic partialFlashCharacteristic = pfService.getCharacteristic(PARTIAL_FLASH_CHARACTERISTIC);
-
         try {
             for (int i = 0; i < 3; i++)
             {
                 // Get Start, End, and Hash of each Region
                 // Request Region
                 byte[] payload = {REGION_INFO_COMMAND, (byte)i};
+                if(partialFlashCharacteristic == null || mBluetoothGatt == null) return false;
                 partialFlashCharacteristic.setValue(payload);
                 status = mBluetoothGatt.writeCharacteristic(partialFlashCharacteristic);
-                Log.v(TAG, "Request Region " + i + " Status: " + status);
+                if(!status) {
+                    Log.v(TAG, "Failed to write to Region characteristic");
+                    return false;
+                }
+                Log.v(TAG, "Request Region " + i);
 
                 synchronized (region_lock) {
-                    region_lock.wait();
+                    region_lock.wait(2000);
                 }
 
             }
