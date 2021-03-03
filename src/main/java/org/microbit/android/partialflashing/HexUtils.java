@@ -97,6 +97,29 @@ public class HexUtils {
         // Return -1 if no match
         return -1;
     }
+
+    /*
+     * A function to search for data in a hex file
+     * @param the _string_ of data to search for
+     * @return the index of the data. -1 if not found.
+     */
+    public int searchForDataRegEx(String search) throws IOException {
+        // Iterate through
+        ListIterator i = hexLines.listIterator();
+        while (i.hasNext()) {
+            // Have to call nextIndex() before next()
+            int index = i.nextIndex();
+
+            // Return index if successful
+            String match = i.next().toString();
+            if(match.matches(search)){
+                return index;
+            }
+        }
+
+        // Return -1 if no match
+        return -1;
+    }
     
     /*
      * Returns data from an index
