@@ -18,6 +18,10 @@ import java.util.ListIterator;
  * A Class to manipulate micro:bit hex files
  * Focused towards stripping a file down to it's PXT section for use in Partial Flashing
  *
+ *   (c) 2017 - 2021, Micro:bit Educational Foundation and contributors
+ *
+ *  SPDX-License-Identifier: MIT
+ *
  */
 
 public class HexUtils {

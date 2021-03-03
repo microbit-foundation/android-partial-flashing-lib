@@ -30,6 +30,10 @@ import java.util.UUID;
 /**
  * A class to communicate with and flash the micro:bit without having to transfer the entire HEX file
  * Created by samkent on 07/11/2017.
+ *
+ * (c) 2017 - 2021, Micro:bit Educational Foundation and contributors
+ *
+ * SPDX-License-Identifier: MIT
  */
 
 // A service that interacts with the BLE device via the Android BLE API.
