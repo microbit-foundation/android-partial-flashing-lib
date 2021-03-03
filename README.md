@@ -1,7 +1,8 @@
 # micro:bit Partial Flashing Library for Android
 
-This library provides partial flashing capabilities to an Android application. It will process a hex file created in MakeCode and flash only the MakeCode script.
+This library provides partial flashing capabilities to an Android application.
 
+It will process a hex file created in MakeCode or the Python Editor and flash only the user script.
 To modularize the code, information is passed to and from the library using Intents.
 
 ## Including the lib in an application
@@ -81,3 +82,11 @@ An example that forwards the information to a React Native app:
 
 ...
 ```
+
+## Partial Flashing Algorithm
+
+More information on the partial flashing algorithm can be found [here](https://github.com/lancaster-university/codal-microbit-v2/blob/master/docs/MemoryMap.md).
+
+## Code of Conduct
+
+When interacting with this repository please follow the Micro:bit Foundation's [Code of Conduct](https://microbit.org/terms-of-use/#the-micro:bit-educational-foundation-code-of-conduct).
