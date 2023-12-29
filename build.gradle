@@ -14,7 +14,8 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.txt'
         }
     }
-    lintOptions {
+    namespace 'org.microbit.partialflashing'
+    lint {
         abortOnError false
     }
 }
