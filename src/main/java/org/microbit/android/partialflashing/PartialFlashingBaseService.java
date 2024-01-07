@@ -96,6 +96,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
     boolean python = false;
     String dalHash;
 
+    long code_startAddress = 0;
+
+    long code_endAddress = 0;
+
     // Partial Flashing Commands
     private static final byte REGION_INFO_COMMAND = 0x0;
     private static final byte FLASH_COMMAND = 0x1;
@@ -150,7 +154,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     String intentAction;
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
 
-                        final boolean success = gatt.discoverServices();
                         mConnectionState = STATE_CONNECTED;
 
                         /* Taken from Nordic. See reasoning here: https://github.com/NordicSemiconductor/Android-DFU-Library/blob/e0ab213a369982ae9cf452b55783ba0bdc5a7916/dfu/src/main/java/no/nordicsemi/android/dfu/DfuBaseService.java#L888 */
@@ -165,11 +168,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
                                 }
                                 Log.v(TAG, "Bond timeout");
                             }
-                            // After 1.6s the services are already discovered so the following gatt.discoverServices() finishes almost immediately.
-                            // NOTE: This also works with shorted waiting time. The gatt.discoverServices() must be called after the indication is received which is
+                             // NOTE: This also works with shorted waiting time. The gatt.discoverServices() must be called after the indication is received which is
                             // about 600ms after establishing connection. Values 600 - 1600ms should be OK.
                         }
-                        gatt.discoverServices();
+                        final boolean success = gatt.discoverServices();
 
                         if (!success) {
                             Log.e(TAG,"ERROR_SERVICE_DISCOVERY_NOT_STARTED");
@@ -254,6 +256,18 @@ public abstract class PartialFlashingBaseService extends IntentService {
                             byte[] startAddress = Arrays.copyOfRange(notificationValue, 2, 6);
                             byte[] endAddress = Arrays.copyOfRange(notificationValue, 6, 10);
                             Log.v(TAG, "startAddress: " + bytesToHex(startAddress) + " endAddress: " + bytesToHex(endAddress));
+
+                            if ( notificationValue[1] == REGION_MAKECODE) {
+                                code_startAddress = Byte.toUnsignedLong(startAddress[0])
+                                        + Byte.toUnsignedLong(startAddress[0]) * 256
+                                        + Byte.toUnsignedLong(startAddress[0]) * 256 * 256
+                                        + Byte.toUnsignedLong(startAddress[0]) * 256 * 256 * 256;
+
+                                code_endAddress = Byte.toUnsignedLong(endAddress[0])
+                                        + Byte.toUnsignedLong(endAddress[0]) * 256
+                                        + Byte.toUnsignedLong(endAddress[0]) * 256 * 256
+                                        + Byte.toUnsignedLong(endAddress[0]) * 256 * 256 * 256;
+                            }
 
                             byte[] hash = Arrays.copyOfRange(notificationValue, 10, 18);
                             Log.v(TAG, "Hash: " + bytesToHex(hash));
@@ -351,11 +365,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     public int attemptPartialFlash(String filePath) {
         Log.v(TAG, "Flashing: " + filePath);
-        long startTime = SystemClock.elapsedRealtime();
-
-        int count = 0;
-        int progressBar = 0;
-        int numOfLines = 0;
 
         sendProgressBroadcastStart();
 
@@ -365,30 +374,49 @@ public abstract class PartialFlashingBaseService extends IntentService {
             Log.v(TAG, filePath);
             HexUtils hex = new HexUtils(filePath);
             Log.v(TAG, "searchForData()");
+            String hash = "";
             int magicIndex = hex.searchForData(PXT_MAGIC);
-
-            if (magicIndex == -1) {
-                magicIndex = hex.searchForDataRegEx(UPY_MAGIC);
-                python = true;
+            if (magicIndex > -1) {
+                python = false;
+                String magicData = hex.getDataFromIndex(magicIndex);
+                int next = magicData.indexOf(PXT_MAGIC) + PXT_MAGIC.length();
+                if ( next < magicData.length()) {
+                    hash = magicData.substring( next);
+                }
+                if ( hash.length() < 16) {
+                    String nextData = hex.getDataFromIndex( magicIndex + 1);
+                    hash = hash + nextData.substring( 0, 16 - hash.length());
+                }
+            } else {
+//                magicIndex = hex.searchForDataRegEx(UPY_MAGIC);
+//                python = true;
             }
 
-            Log.v(TAG, "/searchForData() = " + magicIndex);
-            if (magicIndex > -1) {
-                
-                Log.v(TAG, "Found PXT_MAGIC");
+            if (magicIndex == -1) {
+                Log.v(TAG, "No magic");
+                return PF_ATTEMPT_DFU;
+            }
 
-                // Get Memory Map from Microbit
-                try {
-                    Log.v(TAG, "readMemoryMap()");
-                    readMemoryMap();
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
+            Log.v(TAG, "Found PXT_MAGIC at " + magicIndex);
+
+            // Get Memory Map from Microbit
+            try {
+                Log.v(TAG, "readMemoryMap()");
+                readMemoryMap();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+
+            // Compare DAL hash
+            if( !python) {
+                if (!hash.equals(dalHash)) {
+                    Log.v(TAG, hash + " " + (dalHash));
+                    return PF_ATTEMPT_DFU;
                 }
-                
-                // Find DAL hash
-                if(python) magicIndex = magicIndex - 3;
+            } else {
+                magicIndex = magicIndex - 3;
 
-                int record_length = hex.getRecordDataLengthFromIndex(magicIndex );
+                int record_length = hex.getRecordDataLengthFromIndex(magicIndex);
                 Log.v(TAG, "Length of record: " + record_length);
 
                 int magic_offset = (record_length == 64) ? 32 : 0;
@@ -397,7 +425,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
                 Log.v(TAG, hashes);
 
-                if(hashes.charAt(3) == '2') {
+                if (hashes.charAt(3) == '2') {
                     // Uses a hash pointer. Create regex and extract from hex
                     String regEx = ".*" +
                             dalHash +
@@ -405,123 +433,150 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     int hashIndex = hex.searchForDataRegEx(regEx);
 
                     // TODO Uses CRC of hash
-                    if(hashIndex == -1 ) {
+                    if (hashIndex == -1) {
                         // return PF_ATTEMPT_DFU;
                     }
                     // hashes = hex.getDataFromIndex(hashIndex);
                     // Log.v(TAG, "hash: " + hashes);
-                } else if(!hashes.substring(magic_offset, magic_offset + 16).equals(dalHash)) {
-                        Log.v(TAG, hashes.substring(magic_offset, magic_offset + 16) + " " + (dalHash));
-                        return PF_ATTEMPT_DFU;
+                } else if (!hashes.substring(magic_offset, magic_offset + 16).equals(dalHash)) {
+                    Log.v(TAG, hashes.substring(magic_offset, magic_offset + 16) + " " + (dalHash));
+                    return PF_ATTEMPT_DFU;
+                }
+            }
+
+            int count = 0;
+            int numOfLines = hex.numOfLines() - magicIndex;
+            Log.v(TAG, "Total lines: " + numOfLines);
+
+            int  magicLo = hex.getRecordAddressFromIndex(magicIndex);
+            int  magicHi = hex.getSegmentAddress(magicIndex);
+            long magicA   = (long) magicLo + (long) magicHi * 256 * 256;
+
+            // Ready to flash!
+            // Loop through data
+            int packetNum = 0;
+            int lineCount = 0;
+            int part = 0;
+            int line0 = 0;
+            int part0 = 0;
+
+            int  addrLo = hex.getRecordAddressFromIndex(magicIndex + lineCount);
+            int  addrHi = hex.getSegmentAddress(magicIndex + lineCount);
+            long addr   = (long) addrLo + (long) addrHi * 256 * 256;
+
+            String hexData;
+            String partData;
+
+            Log.v(TAG, "enter flashing loop");
+
+            long startTime = SystemClock.elapsedRealtime();
+            while (true) {
+                // Timeout if total is > 30 seconds
+                if(SystemClock.elapsedRealtime() - startTime > 60000) {
+                    Log.v(TAG, "Partial flashing has timed out");
+                    return PF_FAILED;
                 }
 
-                numOfLines = hex.numOfLines() - magicIndex;
-                Log.v(TAG, "Total lines: " + numOfLines);
+                // Check if EOF
+                if(hex.getRecordTypeFromIndex(magicIndex + lineCount) != 0) {
+                    break;
+                }
 
-                // Ready to flash!
-                // Loop through data
-                String hexData;
-                int packetNum = 0;
-                int lineCount = 0;
+                addrLo = hex.getRecordAddressFromIndex(magicIndex + lineCount);
+                addrHi = hex.getSegmentAddress(magicIndex + lineCount);
+                addr   = (long) addrLo + (long) addrHi * 256 * 256;
 
-                Log.v(TAG, "enter flashing loop");
+                hexData = hex.getDataFromIndex( magicIndex + lineCount);
+                if ( part + 32 > hexData.length()) {
+                    partData = hexData.substring( part);
+                } else {
+                    partData = hexData.substring(part, part + 32);
+                }
+                Log.v(TAG, partData);
 
-                while(true){
-                    // Timeout if total is > 30 seconds
-                    if(SystemClock.elapsedRealtime() - startTime > 60000) {
-                        Log.v(TAG, "Partial flashing has timed out");
-                        return PF_FAILED;
-                    }
+                // recordToByteArray() build a PF command block with the data
+                int offsetToSend = 0;
+                if (count == 0) {
+                    offsetToSend = addrLo + part;
+                } else if (count == 1) {
+                    offsetToSend = addrHi;
+                }
+                byte chunk[] = HexUtils.recordToByteArray(partData, offsetToSend, packetNum);
 
-                    // Get next data to write
-                    hexData = hex.getDataFromIndex(magicIndex + lineCount);
+                // Write without response
+                // Wait for previous write to complete
+                boolean writeStatus = writePartialFlash(partialFlashCharacteristic, chunk);
 
-                    Log.v(TAG, hexData);
+                if ( count == 0)
+                {
+                    line0 = lineCount;
+                    part0 = part;
+                }
 
-                    // Check if EOF
-                    if(hex.getRecordTypeFromIndex(magicIndex + lineCount) != 0) break;
+                // Sleep after 4 packets
+                count++;
+                if ( count == 4){
+                    count = 0;
 
-                    // Split into bytes
-                    int offsetToSend = 0;
-                    if(count == 0) {
-                        offsetToSend = hex.getRecordAddressFromIndex(magicIndex + lineCount);
-                    }
+                    // Wait for notification
+                    Log.v(TAG, "Wait for notification");
 
-                    if(count == 1) {
-                        offsetToSend = hex.getSegmentAddress(magicIndex + lineCount);
-                    }
+                    // Send broadcast while waiting
+                    int percent = Math.round((float)100 * ((float)(lineCount) / (float)(numOfLines)));
+                    sendProgressBroadcast(percent);
 
-                    byte chunk[] = HexUtils.recordToByteArray(hexData, offsetToSend, packetNum);
-
-                    // Write without response
-                    // Wait for previous write to complete
-                    boolean writeStatus = writePartialFlash(partialFlashCharacteristic, chunk);
-
-                    // Sleep after 4 packets
-                    count++;
-                    if(count == 4){
-                        count = 0;
-                        
-                        // Wait for notification
-                        Log.v(TAG, "Wait for notification");
-                        
-                        // Send broadcast while waiting
-                        int percent = Math.round((float)100 * ((float)(lineCount) / (float)(numOfLines)));
-                        sendProgressBroadcast(percent);
-
-                        long timeout = SystemClock.elapsedRealtime();
-                        while(packetState == PACKET_STATE_WAITING) {
-                            synchronized (lock) {
-                                lock.wait(5000);
-                            }
-
-                            // Timeout if longer than 5 seconds
-                            if((SystemClock.elapsedRealtime() - timeout) > 5000)return PF_FAILED;
+                    long timeout = SystemClock.elapsedRealtime();
+                    while(packetState == PACKET_STATE_WAITING) {
+                        synchronized (lock) {
+                            lock.wait(5000);
                         }
 
-                        packetState = PACKET_STATE_WAITING;
-
-                        Log.v(TAG, "/Wait for notification");
-
-                    } else {
-                        Thread.sleep(5);
+                        // Timeout if longer than 5 seconds
+                        if((SystemClock.elapsedRealtime() - timeout) > 5000)
+                            return PF_FAILED;
                     }
 
-                    // If notification is retransmit -> retransmit last block.
-                    // Else set start of new block
-                    if(packetState == PACKET_STATE_RETRANSMIT) {
-                        lineCount = lineCount - 4;
-                    } else {
-                        // Next line
-                        lineCount = lineCount + 1;
-                    }
+                    packetState = PACKET_STATE_WAITING;
 
-                    // Always increment packet #
-                    packetNum = packetNum + 1;
+                    Log.v(TAG, "/Wait for notification");
 
+                } else {
+                    Thread.sleep(5);
                 }
 
+                // If notification is retransmit -> retransmit last block.
+                // Else set start of new block
+                if(packetState == PACKET_STATE_RETRANSMIT) {
+                    lineCount = line0;
+                    part = part0;
+                } else {
+                    // Next part
+                    part = part + partData.length();
+                    if ( part >= hexData.length()) {
+                        part = 0;
+                        lineCount = lineCount + 1;
+                    }
+                }
 
-
-                // Write End of Flash packet
-                byte[] endOfFlashPacket = {(byte)0x02};
-                writePartialFlash(partialFlashCharacteristic, endOfFlashPacket);
-
-                // Finished Writing
-                Log.v(TAG, "Flash Complete");
-                packetState = PACKET_STATE_COMPLETE_FLASH;
-                sendProgressBroadcast(100);
-                sendProgressBroadcastComplete();
-
-                // Time execution
-                long endTime = SystemClock.elapsedRealtime();
-                long elapsedMilliSeconds = endTime - startTime;
-                double elapsedSeconds = elapsedMilliSeconds / 1000.0;
-                Log.v(TAG, "Flash Time: " + Float.toString((float)elapsedSeconds) + " seconds");
-
-            } else {
-                return PF_ATTEMPT_DFU;
+                // Always increment packet #
+                packetNum = packetNum + 1;
             }
+
+            // Write End of Flash packet
+            byte[] endOfFlashPacket = {(byte)0x02};
+            writePartialFlash(partialFlashCharacteristic, endOfFlashPacket);
+
+            // Finished Writing
+            Log.v(TAG, "Flash Complete");
+            packetState = PACKET_STATE_COMPLETE_FLASH;
+            sendProgressBroadcast(100);
+            sendProgressBroadcastComplete();
+
+            // Time execution
+            long endTime = SystemClock.elapsedRealtime();
+            long elapsedMilliSeconds = endTime - startTime;
+            double elapsedSeconds = elapsedMilliSeconds / 1000.0;
+            Log.v(TAG, "Flash Time: " + Float.toString((float)elapsedSeconds) + " seconds");
         } catch (IOException e) {
             e.printStackTrace();
         } catch (InterruptedException e) {
