@@ -258,15 +258,15 @@ public abstract class PartialFlashingBaseService extends IntentService {
                             Log.v(TAG, "startAddress: " + bytesToHex(startAddress) + " endAddress: " + bytesToHex(endAddress));
 
                             if ( notificationValue[1] == REGION_MAKECODE) {
-                                code_startAddress = Byte.toUnsignedLong(startAddress[0])
-                                        + Byte.toUnsignedLong(startAddress[0]) * 256
-                                        + Byte.toUnsignedLong(startAddress[0]) * 256 * 256
-                                        + Byte.toUnsignedLong(startAddress[0]) * 256 * 256 * 256;
+                                code_startAddress = Byte.toUnsignedLong(notificationValue[5])
+                                        + Byte.toUnsignedLong(notificationValue[4]) * 256
+                                        + Byte.toUnsignedLong(notificationValue[3]) * 256 * 256
+                                        + Byte.toUnsignedLong(notificationValue[2]) * 256 * 256 * 256;
 
-                                code_endAddress = Byte.toUnsignedLong(endAddress[0])
-                                        + Byte.toUnsignedLong(endAddress[0]) * 256
-                                        + Byte.toUnsignedLong(endAddress[0]) * 256 * 256
-                                        + Byte.toUnsignedLong(endAddress[0]) * 256 * 256 * 256;
+                                code_endAddress = Byte.toUnsignedLong(notificationValue[9])
+                                        + Byte.toUnsignedLong(notificationValue[8]) * 256
+                                        + Byte.toUnsignedLong(notificationValue[7]) * 256 * 256
+                                        + Byte.toUnsignedLong(notificationValue[6]) * 256 * 256 * 256;
                             }
 
                             byte[] hash = Arrays.copyOfRange(notificationValue, 10, 18);
@@ -375,13 +375,15 @@ public abstract class PartialFlashingBaseService extends IntentService {
             HexUtils hex = new HexUtils(filePath);
             Log.v(TAG, "searchForData()");
             String hash = "";
+            int magicPart  = 0;
             int magicIndex = hex.searchForData(PXT_MAGIC);
             if (magicIndex > -1) {
                 python = false;
                 String magicData = hex.getDataFromIndex(magicIndex);
-                int next = magicData.indexOf(PXT_MAGIC) + PXT_MAGIC.length();
+                magicPart = magicData.indexOf(PXT_MAGIC);
+                int next = magicPart + PXT_MAGIC.length();
                 if ( next < magicData.length()) {
-                    hash = magicData.substring( next);
+                    hash = magicData.substring( magicPart);
                 }
                 if ( hash.length() < 16) {
                     String nextData = hex.getDataFromIndex( magicIndex + 1);
@@ -397,18 +399,24 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 return PF_ATTEMPT_DFU;
             }
 
-            Log.v(TAG, "Found PXT_MAGIC at " + magicIndex);
+            Log.v(TAG, "Found PXT_MAGIC at " + magicIndex + " at offset " + magicPart);
 
             // Get Memory Map from Microbit
-            try {
-                Log.v(TAG, "readMemoryMap()");
-                readMemoryMap();
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+            code_startAddress = code_endAddress = 0;
+            if ( !readMemoryMap())
+            {
+                Log.w(TAG, "Failed to read memory map");
+                return PF_ATTEMPT_DFU;
             }
+            // TODO: readMemoryMap may still have failed - more checks are needed
 
             // Compare DAL hash
             if( !python) {
+                if ( code_startAddress == 0 || code_endAddress <= code_startAddress)
+                {
+                    Log.v(TAG, "Failed to read memory map code address");
+                    return PF_ATTEMPT_DFU;
+                }
                 if (!hash.equals(dalHash)) {
                     Log.v(TAG, hash + " " + (dalHash));
                     return PF_ATTEMPT_DFU;
@@ -450,15 +458,13 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
             int  magicLo = hex.getRecordAddressFromIndex(magicIndex);
             int  magicHi = hex.getSegmentAddress(magicIndex);
-            long magicA   = (long) magicLo + (long) magicHi * 256 * 256;
+            long magicA   = (long) magicLo + (long) magicHi * 256 * 256 + magicPart;
 
-            // Ready to flash!
-            // Loop through data
             int packetNum = 0;
             int lineCount = 0;
-            int part = 0;
-            int line0 = 0;
-            int part0 = 0;
+            int part = magicPart; // magic is first data to be copied
+            int line0 = lineCount;
+            int part0 = part;
 
             int  addrLo = hex.getRecordAddressFromIndex(magicIndex + lineCount);
             int  addrHi = hex.getSegmentAddress(magicIndex + lineCount);
@@ -467,7 +473,21 @@ public abstract class PartialFlashingBaseService extends IntentService {
             String hexData;
             String partData;
 
+            Log.w(TAG, "Code start " + code_startAddress + " end " + code_endAddress);
+            Log.w(TAG, "First line " + addr);
+
+            // Ready to flash!
+            // Loop through data
             Log.v(TAG, "enter flashing loop");
+
+            long addr0 = addr + part / 2;  // two hex digits per byte
+            int  addr0Lo = (int) ( addr0 % (256 * 256));
+            int  addr0Hi = (int) ( addr0 / (256 * 256));
+
+            if ( code_startAddress != addr0) {
+                Log.v(TAG, "Code start address doesn't match");
+                return PF_ATTEMPT_DFU;
+            }
 
             long startTime = SystemClock.elapsedRealtime();
             while (true) {
@@ -492,26 +512,28 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 } else {
                     partData = hexData.substring(part, part + 32);
                 }
-                Log.v(TAG, partData);
 
-                // recordToByteArray() build a PF command block with the data
                 int offsetToSend = 0;
-                if (count == 0) {
-                    offsetToSend = addrLo + part;
+                if ( count == 0)
+                {
+                    line0 = lineCount;
+                    part0 = part;
+                    addr0 = addr + part / 2;  // two hex digits per byte
+                    addr0Lo = (int) ( addr0 % (256 * 256));
+                    addr0Hi = (int) ( addr0 / (256 * 256));
+                    offsetToSend = addr0Lo;
                 } else if (count == 1) {
-                    offsetToSend = addrHi;
+                    offsetToSend = addr0Hi;
                 }
+
+                Log.v(TAG, packetNum + " " + count + " addr0 " + addr0 + " offsetToSend " + offsetToSend + " line " + lineCount + " addr " + addr + " part " + part + " data " + partData);
+
+                // recordToByteArray() builds a PF command block with the data
                 byte chunk[] = HexUtils.recordToByteArray(partData, offsetToSend, packetNum);
 
                 // Write without response
                 // Wait for previous write to complete
                 boolean writeStatus = writePartialFlash(partialFlashCharacteristic, chunk);
-
-                if ( count == 0)
-                {
-                    line0 = lineCount;
-                    part0 = part;
-                }
 
                 // Sleep after 4 packets
                 count++;
@@ -778,7 +800,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
     /*
     Read Memory Map from the MB
      */
-    private Boolean readMemoryMap() throws InterruptedException {
+    private boolean readMemoryMap() {
         boolean status; // Gatt Status
 
         try {
@@ -799,12 +821,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 synchronized (region_lock) {
                     region_lock.wait(2000);
                 }
-
             }
-
-
         } catch (Exception e){
             Log.e(TAG, e.toString());
+            return false;
         }
 
         return true;
