@@ -12,7 +12,6 @@ import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
-import android.bluetooth.BluetoothStatusCodes;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -28,7 +27,6 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.util.Arrays;
-import java.util.List;
 import java.util.UUID;
 
 /**
@@ -70,7 +68,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     /* Receive updates on user interaction */
     private BroadcastReceiver broadcastReceiver = new BroadcastReceiver() {
-
         @Override
         public void onReceive(Context context, final Intent intent) {
             logi( "Received Broadcast: " + intent.toString());
@@ -106,36 +103,27 @@ public abstract class PartialFlashingBaseService extends IntentService {
     }
 
     private void sendProgressBroadcast(final int progress) {
-
         logi( "Sending progress broadcast: " + progress + "%");
-
         final Intent broadcast = new Intent(BROADCAST_PROGRESS);
         broadcast.putExtra(EXTRA_PROGRESS, progress);
-
         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
     }
 
     private void sendProgressBroadcastStart() {
-
         logi( "Sending progress broadcast start");
-
         final Intent broadcast = new Intent(BROADCAST_START);
-
         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
     }
 
     private void sendProgressBroadcastComplete() {
-
         logi( "Sending progress broadcast complete");
-
         final Intent broadcast = new Intent(BROADCAST_COMPLETE);
-
         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
     }
 
     @Override
     protected void onHandleIntent(@Nullable Intent intent) {
-        logi("onHandleIntent");
+        logi( "onHandleIntent");
 
         final String filePath = intent.getStringExtra("filepath");
         final String deviceAddress = intent.getStringExtra("deviceAddress");
@@ -193,10 +181,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     private BluetoothManager mBluetoothManager;
     private BluetoothAdapter mBluetoothAdapter;
-    private String mBluetoothDeviceAddress;
     private BluetoothGatt mBluetoothGatt = null;
     private int mConnectionState = STATE_DISCONNECTED;
-    private BluetoothDevice device;
     private boolean descriptorWriteSuccess = false;
     BluetoothGattDescriptor descriptorRead = null;
     boolean descriptorReadSuccess = false;
@@ -214,10 +200,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final byte PACKET_STATE_COMPLETE_FLASH = (byte) 0xCF;
 
     private byte packetState = PACKET_STATE_WAITING;
-
-    // Used to lock the program state while we wait for a Bluetooth operation to complete
-    private static final boolean BLE_WAITING = false;
-    private static final boolean BLE_READY = true;
 
     private static final int STATE_DISCONNECTED = 0;
     private static final int STATE_CONNECTING = 1;
@@ -245,17 +227,13 @@ public abstract class PartialFlashingBaseService extends IntentService {
     // Partial Flashing Commands
     private static final byte REGION_INFO_COMMAND = 0x0;
     private static final byte FLASH_COMMAND = 0x1;
-    Boolean notificationReceived;
-
-    // Regions
-    String[] regions = {"SoftDevice", "DAL", "MakeCode"};
 
     // Microbit Type
     private final int MICROBIT_V1 = 1;
     private final int MICROBIT_V2 = 2;
     int hardwareType = MICROBIT_V1;
 
-    // Partial Flashing Return Vals
+    // Partial Flashing Return Values
     private static final int PF_SUCCESS = 0x0;
     private static final int PF_ATTEMPT_DFU = 0x1;
     private static final int PF_FAILED = 0x2;
