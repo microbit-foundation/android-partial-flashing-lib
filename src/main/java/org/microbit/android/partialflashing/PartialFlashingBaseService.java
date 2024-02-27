@@ -138,16 +138,23 @@ public abstract class PartialFlashingBaseService extends IntentService {
     public final static String EXTRA_DATA =
             "com.example.bluetooth.le.EXTRA_DATA";
 
-    private final static boolean DEBUGLOGI = false;
+    static boolean DEBUG = false;
+
     public void logi(String message) {
-        if(DEBUGLOGI) {
+        if( DEBUG) {
             Log.i(TAG, "### " + Thread.currentThread().getId() + " # " + message);
         }
+    }
+
+    protected boolean isDebug() {
+        return false;
     }
 
     @Override
     public void onCreate() {
         super.onCreate();
+
+        DEBUG = isDebug();
 
         // Create intent filter and add to Local Broadcast Manager so that we can use an Intent to 
         // start the Partial Flashing Service
