@@ -253,6 +253,122 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final int PF_ATTEMPT_DFU = 0x1;
     private static final int PF_FAILED = 0x2;
 
+    private void partialFlash( final String filePath, final String deviceAddress, final boolean pf) {
+        logi( "partialFlash");
+
+        for ( int i = 0; i < 3; i++) {
+            mBluetoothGatt = connect(deviceAddress);
+            if (mBluetoothGatt != null)
+                break;
+        }
+
+        if (mBluetoothGatt == null) {
+            logi( "Failed to connect");
+            logi( "Send Intent: DFU_BROADCAST_ERROR");
+            final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+            return;
+        }
+
+        if ( Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (serviceChangedCharacteristic() != null) {
+                if (!cccEnabled(serviceChangedCharacteristic(), false)) {
+                    // Only seem to get here with V1
+                    // After this, the refresh function is never called
+                    // But it doesn't seem to work in Android 8
+                    cccEnable(serviceChangedCharacteristic(), false);
+                    mBluetoothGatt.disconnect();
+                    timeoutOnLock(2000);
+                    mBluetoothGatt.close();
+                    mBluetoothGatt = null;
+
+                    mBluetoothGatt = connect(deviceAddress);
+                    if (mBluetoothGatt == null) {
+                        logi( "Failed to connect");
+                        logi( "Send Intent: DFU_BROADCAST_ERROR");
+                        final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
+                        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+                        return;
+                    }
+                    if (!cccEnabled(serviceChangedCharacteristic(), false)) {
+                        cccEnable(serviceChangedCharacteristic(), false);
+                    }
+                }
+            }
+        }
+
+        boolean isV1 = connectedHasV1Dfu();
+        if ( isV1) {
+            refreshV1ForMicroBitDfu();
+        }
+
+        int pfResult = PF_ATTEMPT_DFU;
+        if ( pf) {
+            logi( "Trying to partial flash");
+            if ( partialFlashCharacteristicCheck()) {
+                pfResult = attemptPartialFlash( filePath);
+            }
+        }
+
+        String action = "";
+
+        switch ( pfResult) {
+            case PF_FAILED: {
+                // Partial flashing started but failed. Need to PF or USB flash to fix
+                logi( "Partial flashing failed");
+                logi( "Send Intent: BROADCAST_PF_FAILED");
+                action = BROADCAST_PF_FAILED;
+                break;
+            }
+            case PF_ATTEMPT_DFU: {
+                logi( "Attempt DFU");
+                action = BROADCAST_PF_ATTEMPT_DFU;
+                // If v1 we need to switch the DFU mode
+                if( isV1) {
+                    if ( !enterDFUModeV1()) {
+                        logi( "Failed to enter DFU mode");
+                        action = DFU_BROADCAST_ERROR;
+                    }
+                }
+                break;
+            }
+            case PF_SUCCESS: {
+                logi( "Partial flashing succeeded");
+                break;
+            }
+        }
+
+        logi( "disconnect");
+        mBluetoothGatt.disconnect();
+        timeoutOnLock( 2000);
+        mBluetoothGatt.close();
+        mBluetoothGatt = null;
+
+        if ( isV1 && action == BROADCAST_PF_ATTEMPT_DFU) {
+            // Try to ensure the NordicDfu profile
+            for ( int i = 0; i < 5; i++) {
+                mBluetoothGatt = connect(deviceAddress);
+                if ( mBluetoothGatt != null)
+                    break;
+                timeoutOnLock( 1000);
+            }
+
+            if ( mBluetoothGatt != null) {
+                refreshV1ForNordicDfu();
+                mBluetoothGatt.disconnect();
+                timeoutOnLock(2000);
+                mBluetoothGatt.close();
+                mBluetoothGatt = null;
+            }
+        }
+
+        if ( !action.isEmpty()) {
+            logi( "Send Intent: " + action);
+            final Intent broadcast = new Intent(action);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+        }
+        logi( "onHandleIntent End");
+    }
 
     // Various callback methods defined by the BLE API.
     private final BluetoothGattCallback mGattCallback =
@@ -922,123 +1038,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
         }
         timeoutOnLock(1000);
         return descriptorWriteSuccess;
-    }
-
-    private void partialFlash( final String filePath, final String deviceAddress, final boolean pf) {
-        logi( "partialFlash");
-
-        for ( int i = 0; i < 3; i++) {
-            mBluetoothGatt = connect(deviceAddress);
-            if (mBluetoothGatt != null)
-                break;
-        }
-
-        if (mBluetoothGatt == null) {
-            logi( "Failed to connect");
-            logi( "Send Intent: DFU_BROADCAST_ERROR");
-            final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
-            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
-            return;
-        }
-
-        if ( Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            if (serviceChangedCharacteristic() != null) {
-                if (!cccEnabled(serviceChangedCharacteristic(), false)) {
-                    // Only seem to get here with V1
-                    // After this, the refresh function is never called
-                    // But it doesn't seem to work in Android 8
-                    cccEnable(serviceChangedCharacteristic(), false);
-                    mBluetoothGatt.disconnect();
-                    timeoutOnLock(2000);
-                    mBluetoothGatt.close();
-                    mBluetoothGatt = null;
-
-                    mBluetoothGatt = connect(deviceAddress);
-                    if (mBluetoothGatt == null) {
-                        logi( "Failed to connect");
-                        logi( "Send Intent: DFU_BROADCAST_ERROR");
-                        final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
-                        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
-                        return;
-                    }
-                    if (!cccEnabled(serviceChangedCharacteristic(), false)) {
-                        cccEnable(serviceChangedCharacteristic(), false);
-                    }
-                }
-            }
-        }
-
-        boolean isV1 = connectedHasV1Dfu();
-        if ( isV1) {
-            refreshV1ForMicroBitDfu();
-        }
-
-        int pfResult = PF_ATTEMPT_DFU;
-        if ( pf) {
-            logi( "Trying to partial flash");
-            if ( partialFlashCharacteristicCheck()) {
-                pfResult = attemptPartialFlash( filePath);
-            }
-        }
-
-        String action = "";
-
-        switch ( pfResult) {
-            case PF_FAILED: {
-                // Partial flashing started but failed. Need to PF or USB flash to fix
-                logi( "Partial flashing failed");
-                logi( "Send Intent: BROADCAST_PF_FAILED");
-                action = BROADCAST_PF_FAILED;
-                break;
-            }
-            case PF_ATTEMPT_DFU: {
-                logi( "Attempt DFU");
-                action = BROADCAST_PF_ATTEMPT_DFU;
-                // If v1 we need to switch the DFU mode
-                if( isV1) {
-                    if ( !enterDFUModeV1()) {
-                        logi( "Failed to enter DFU mode");
-                        action = DFU_BROADCAST_ERROR;
-                    }
-                }
-                break;
-            }
-            case PF_SUCCESS: {
-                logi( "Partial flashing succeeded");
-                break;
-            }
-        }
-
-        logi( "disconnect");
-        mBluetoothGatt.disconnect();
-        timeoutOnLock( 2000);
-        mBluetoothGatt.close();
-        mBluetoothGatt = null;
-
-        if ( isV1 && action == BROADCAST_PF_ATTEMPT_DFU) {
-            // Try to ensure the NordicDfu profile
-            for ( int i = 0; i < 5; i++) {
-                mBluetoothGatt = connect(deviceAddress);
-                if ( mBluetoothGatt != null)
-                    break;
-                timeoutOnLock( 1000);
-            }
-
-            if ( mBluetoothGatt != null) {
-                refreshV1ForNordicDfu();
-                mBluetoothGatt.disconnect();
-                timeoutOnLock(2000);
-                mBluetoothGatt.close();
-                mBluetoothGatt = null;
-            }
-        }
-
-        if ( !action.isEmpty()) {
-            logi( "Send Intent: " + action);
-            final Intent broadcast = new Intent(action);
-            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
-        }
-        logi( "onHandleIntent End");
     }
 
     protected boolean partialFlashCharacteristicCheck() {
