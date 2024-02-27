@@ -253,6 +253,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final int PF_ATTEMPT_DFU = 0x1;
     private static final int PF_FAILED = 0x2;
 
+    @SuppressLint("MissingPermission")
     private void partialFlash( final String filePath, final String deviceAddress, final boolean pf) {
         logi( "partialFlash");
 
@@ -270,6 +271,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
             return;
         }
 
+        logi( "Connected");
         if ( Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             if (serviceChangedCharacteristic() != null) {
                 if (!cccEnabled(serviceChangedCharacteristic(), false)) {
@@ -277,6 +279,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     // After this, the refresh function is never called
                     // But it doesn't seem to work in Android 8
                     cccEnable(serviceChangedCharacteristic(), false);
+                    logi( "Reconnect");
                     mBluetoothGatt.disconnect();
                     timeoutOnLock(2000);
                     mBluetoothGatt.close();
@@ -367,11 +370,12 @@ public abstract class PartialFlashingBaseService extends IntentService {
             final Intent broadcast = new Intent(action);
             LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
         }
-        logi( "onHandleIntent End");
+        logi( "partialFlash End");
     }
 
     // Various callback methods defined by the BLE API.
     private final BluetoothGattCallback mGattCallback = new BluetoothGattCallback() {
+        @SuppressLint("MissingPermission")
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status,
                                             int newState) {
@@ -391,8 +395,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     // NOTE: This also works with shorter waiting time. The gatt.discoverServices() must be called after the indication is received which is
                     // about 600ms after establishing connection. Values 600 - 1600ms should be OK.
                 }
+                logi( "Calling gatt.discoverServices()");
                 final boolean success = gatt.discoverServices();
-
                 if (!success) {
                     Log.e(TAG,"ERROR_SERVICE_DISCOVERY_NOT_STARTED");
                     mConnectionState = STATE_ERROR;
@@ -437,6 +441,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
         public void onCharacteristicRead(BluetoothGatt gatt,
                                          BluetoothGattCharacteristic characteristic,
                                          int status) {
+            logi( "onServiceChanged");
             logi( String.valueOf(status));
             synchronized (lock) {
                 lock.notifyAll();
@@ -447,6 +452,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
         public void onCharacteristicWrite(BluetoothGatt gatt,
                                           BluetoothGattCharacteristic characteristic,
                                           int status){
+            logi( "onCharacteristicWrite status " + status);
             if(status == BluetoothGatt.GATT_SUCCESS) {
                 // Success
                 logi( "GATT status: Success");
@@ -462,6 +468,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
             super.onCharacteristicChanged(gatt, characteristic);
+            logi( "onCharacteristicChanged");
+            
             byte notificationValue[] = characteristic.getValue();
             logi( "Received Notification: " + bytesToHex(notificationValue));
 
@@ -913,7 +921,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
         }
 
         if ( mConnectionState != STATE_CONNECTED_AND_READY) {
-                              gatt.disconnect();
+            gatt.disconnect();
             gatt.close();
             return null;
         }
@@ -925,6 +933,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     private boolean timeoutOnLock( long timeout)
     {
+        logi( "lockWait");
         synchronized (lock) {
             try {
                 lock.wait(timeout);
@@ -948,9 +957,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
         return connectedHasV1MicroBitDfu() || connectedHasV1NordicDfu();
     }
 
-    private void refreshV1( boolean wantMicroBitDfu) {
+    @SuppressLint("MissingPermission")
+    private void refreshV1(boolean wantMicroBitDfu) {
         if (connectedHasV1Dfu()) {
             if (wantMicroBitDfu != connectedHasV1MicroBitDfu()) {
+                logi( "refreshV1");
                 try {
                     final Method refresh = mBluetoothGatt.getClass().getMethod("refresh");
                     refresh.invoke(mBluetoothGatt);
@@ -985,6 +996,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     @SuppressLint("MissingPermission")
     private boolean cccEnabled(BluetoothGattCharacteristic chr, boolean notify) {
+        logi( "cccEnabled");
         BluetoothGattDescriptor ccc = chr.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG);
         if (ccc == null) {
             return false;
@@ -1015,6 +1027,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
     @SuppressLint("MissingPermission")
     private boolean cccEnable( BluetoothGattCharacteristic chr, boolean notify) {
+        logi( "cccEnable");
         BluetoothGattDescriptor ccc = chr.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG);
         if (ccc == null) {
             return false;
@@ -1038,6 +1051,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
     }
 
     protected boolean partialFlashCharacteristicCheck() {
+        logi( "partialFlashCharacteristicCheck");
 
         // Check for partial flashing
         pfService = mBluetoothGatt.getService(PARTIAL_FLASHING_SERVICE);
@@ -1065,7 +1079,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
         return true;
     }
 
+    @SuppressLint("MissingPermission")
     protected boolean enterDFUModeV1() {
+        logi( "enterDFUModeV1");
+
         BluetoothGattService dfuService = mBluetoothGatt.getService(MICROBIT_DFU_SERVICE);
         // Write Characteristic to enter DFU mode
         if (dfuService == null) {
@@ -1098,8 +1115,9 @@ public abstract class PartialFlashingBaseService extends IntentService {
     /*
     Read Memory Map from the MB
      */
+    @SuppressLint("MissingPermission")
     private boolean readMemoryMap() {
-        boolean status; // Gatt Status
+        logi( "readMemoryMap");
 
         try {
             for (int i = 0; i < 3; i++)
@@ -1109,7 +1127,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 byte[] payload = {REGION_INFO_COMMAND, (byte)i};
                 if(partialFlashCharacteristic == null || mBluetoothGatt == null) return false;
                 partialFlashCharacteristic.setValue(payload);
-                status = mBluetoothGatt.writeCharacteristic(partialFlashCharacteristic);
+                boolean status = mBluetoothGatt.writeCharacteristic(partialFlashCharacteristic);
                 if(!status) {
                     logi( "Failed to write to Region characteristic");
                     return false;
