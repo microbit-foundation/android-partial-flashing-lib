@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
+import android.bluetooth.BluetoothStatusCodes;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -184,6 +185,12 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final UUID MICROBIT_SECURE_DFU_SERVICE = UUID.fromString("0000fe59-0000-1000-8000-00805f9b34fb");
     private static final UUID MICROBIT_DFU_CHARACTERISTIC = UUID.fromString("e95d93b1-251d-470a-a062-fa1922dfa9a8");
 
+    // values for writeCharacteristic
+    private static final int WITH_RESPONSE = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
+    private static final int NO_RESPONSE = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE;
+    private final static int BLE_SUCCESS = 0;
+    private final static int BLE_ERROR_UNKNOWN = Integer.MAX_VALUE;
+
     private BluetoothManager mBluetoothManager;
     private BluetoothAdapter mBluetoothAdapter;
     private String mBluetoothDeviceAddress;
@@ -281,7 +288,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     cccEnable(serviceChangedCharacteristic(), false);
                     logi( "Reconnect");
                     mBluetoothGatt.disconnect();
-                    timeoutOnLock(2000);
+                    lockWait(2000);
                     mBluetoothGatt.close();
                     mBluetoothGatt = null;
 
@@ -343,7 +350,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         logi( "disconnect");
         mBluetoothGatt.disconnect();
-        timeoutOnLock( 2000);
+        lockWait( 2000);
         mBluetoothGatt.close();
         mBluetoothGatt = null;
 
@@ -353,13 +360,13 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 mBluetoothGatt = connect(deviceAddress);
                 if ( mBluetoothGatt != null)
                     break;
-                timeoutOnLock( 1000);
+                lockWait( 1000);
             }
 
             if ( mBluetoothGatt != null) {
                 refreshV1ForNordicDfu();
                 mBluetoothGatt.disconnect();
-                timeoutOnLock(2000);
+                lockWait(2000);
                 mBluetoothGatt.close();
                 mBluetoothGatt = null;
             }
@@ -390,7 +397,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 /* Taken from Nordic. See reasoning here: https://github.com/NordicSemiconductor/Android-DFU-Library/blob/e0ab213a369982ae9cf452b55783ba0bdc5a7916/dfu/src/main/java/no/nordicsemi/android/dfu/DfuBaseService.java#L888 */
                 if (gatt.getDevice().getBondState() == BluetoothDevice.BOND_BONDED) {
                     logi( "Wait for service changed");
-                    timeoutOnLock(1600);
+                    lockWait(1600);
                     logi( "Bond timeout");
                     // NOTE: This also works with shorter waiting time. The gatt.discoverServices() must be called after the indication is received which is
                     // about 600ms after establishing connection. Values 600 - 1600ms should be OK.
@@ -565,14 +572,26 @@ public abstract class PartialFlashingBaseService extends IntentService {
             }
         }
     };
+    
+    @SuppressLint("MissingPermission")
+    private int writeCharacteristic( BluetoothGattCharacteristic c, byte[] data, int writeType) {
+        logi( "writeCharacteristic " + c.getUuid() + " writeType " + writeType);
+        if ( Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            c.setWriteType( writeType);
+            c.setValue(data);
+            int status = mBluetoothGatt.writeCharacteristic(c) ? BLE_SUCCESS : BLE_ERROR_UNKNOWN;
+            logi( "writeCharacteristic status " + status);
+            return status;
+        }
 
+        int status = mBluetoothGatt.writeCharacteristic( c, data, writeType);
+        logi( "writeCharacteristic status " + status);
+        return status;
+    }
 
     // Write to BLE Flash Characteristic
-    public Boolean writePartialFlash(BluetoothGattCharacteristic partialFlashCharacteristic, byte[] data){
-        partialFlashCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
-        partialFlashCharacteristic.setValue(data);
-        boolean status = mBluetoothGatt.writeCharacteristic(partialFlashCharacteristic);
-        return status;
+    public int writePartialFlash( byte[] data, int writeType) {
+        return writeCharacteristic( partialFlashCharacteristic, data, writeType);
     }
 
     public int attemptPartialFlash(String filePath) {
@@ -749,7 +768,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
                 // Write without response
                 // Wait for previous write to complete
-                boolean writeStatus = writePartialFlash(partialFlashCharacteristic, chunk);
+                int writeStatus = writePartialFlash( chunk, NO_RESPONSE);
 
                 // Sleep after 4 packets
                 count++;
@@ -804,7 +823,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
             // Write End of Flash packet
             byte[] endOfFlashPacket = {(byte)0x02};
-            boolean writeStatus = writePartialFlash(partialFlashCharacteristic, endOfFlashPacket);
+            int writeStatus = writePartialFlash( endOfFlashPacket, NO_RESPONSE);
 
             Thread.sleep(100); // allow time for write to complete
 
@@ -931,7 +950,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
         return gatt;
     }
 
-    private boolean timeoutOnLock( long timeout)
+    private boolean lockWait( long timeout)
     {
         logi( "lockWait");
         synchronized (lock) {
@@ -968,7 +987,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 } catch (final Exception e) {
                 }
                 mBluetoothGatt.discoverServices();
-                timeoutOnLock(2000);
+                lockWait(2000);
             }
         }
     }
@@ -1004,7 +1023,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         descriptorReadSuccess = false;
         mBluetoothGatt.readDescriptor(ccc);
-        timeoutOnLock(1000);
+        lockWait(1000);
         if (!descriptorReadSuccess
                 || !descriptorRead.getUuid().equals(CLIENT_CHARACTERISTIC_CONFIG)
                 || !descriptorRead.getCharacteristic().getUuid().equals(chr.getUuid())) {
@@ -1046,7 +1065,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
             ccc.setValue(enable);
             mBluetoothGatt.writeDescriptor( ccc);
         }
-        timeoutOnLock(1000);
+        lockWait(1000);
         return descriptorWriteSuccess;
     }
 
@@ -1097,7 +1116,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         byte payload[] = {0x01};
         microbitDFUCharacteristic.setValue(payload);
-        boolean status = mBluetoothGatt.writeCharacteristic(microbitDFUCharacteristic);
+        int status = writeCharacteristic( microbitDFUCharacteristic, payload, WITH_RESPONSE);
         logi( "MicroBitDFU :: Enter DFU Result " + status);
 
         synchronized (lock) {
@@ -1126,9 +1145,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 // Request Region
                 byte[] payload = {REGION_INFO_COMMAND, (byte)i};
                 if(partialFlashCharacteristic == null || mBluetoothGatt == null) return false;
-                partialFlashCharacteristic.setValue(payload);
-                boolean status = mBluetoothGatt.writeCharacteristic(partialFlashCharacteristic);
-                if(!status) {
+                int status = writePartialFlash( payload, WITH_RESPONSE);
+                if( status != BLE_SUCCESS) {
                     logi( "Failed to write to Region characteristic");
                     return false;
                 }
