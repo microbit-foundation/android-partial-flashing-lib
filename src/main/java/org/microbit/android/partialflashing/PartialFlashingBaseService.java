@@ -41,8 +41,138 @@ import java.util.UUID;
 
 // A service that interacts with the BLE device via the Android BLE API.
 public abstract class PartialFlashingBaseService extends IntentService {
+    private final static String TAG = PartialFlashingBaseService.class.getSimpleName();
+    private static boolean DEBUG = false;
+    public void logi(String message) {
+        if( DEBUG) {
+            Log.i(TAG, "### " + Thread.currentThread().getId() + " # " + message);
+        }
+    }
+
+    // ================================================================
+    // INTENT SERVICE
 
     public static final String DFU_BROADCAST_ERROR = "no.nordicsemi.android.dfu.broadcast.BROADCAST_ERROR";
+    public static final String BROADCAST_ACTION = "org.microbit.android.partialflashing.broadcast.BROADCAST_ACTION";
+    public static final String BROADCAST_PROGRESS = "org.microbit.android.partialflashing.broadcast.BROADCAST_PROGRESS";
+    public static final String BROADCAST_START = "org.microbit.android.partialflashing.broadcast.BROADCAST_START";
+    public static final String BROADCAST_COMPLETE = "org.microbit.android.partialflashing.broadcast.BROADCAST_COMPLETE";
+    public static final String EXTRA_PROGRESS = "org.microbit.android.partialflashing.extra.EXTRA_PROGRESS";
+    public static final String BROADCAST_PF_FAILED = "org.microbit.android.partialflashing.broadcast.BROADCAST_PF_FAILED";
+    public static final String BROADCAST_PF_ATTEMPT_DFU = "org.microbit.android.partialflashing.broadcast.BROADCAST_PF_ATTEMPT_DFU";
+
+    protected abstract Class<? extends Activity> getNotificationTarget();
+
+    public PartialFlashingBaseService() {
+        super(TAG);
+    }
+
+    /* Receive updates on user interaction */
+    private BroadcastReceiver broadcastReceiver = new BroadcastReceiver() {
+
+        @Override
+        public void onReceive(Context context, final Intent intent) {
+            logi( "Received Broadcast: " + intent.toString());
+        }
+    };
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+
+        DEBUG = isDebug();
+
+        logi( "onCreate");
+
+        // Create intent filter and add to Local Broadcast Manager so that we can use an Intent to
+        // start the Partial Flashing Service
+
+        final IntentFilter intentFilter = new IntentFilter();
+        intentFilter.addAction(PartialFlashingBaseService.BROADCAST_ACTION);
+
+        final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
+        manager.registerReceiver(broadcastReceiver, intentFilter);
+
+        initialize();
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        logi( "onDestroy");
+        final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
+        manager.unregisterReceiver(broadcastReceiver);
+    }
+
+    private void sendProgressBroadcast(final int progress) {
+
+        logi( "Sending progress broadcast: " + progress + "%");
+
+        final Intent broadcast = new Intent(BROADCAST_PROGRESS);
+        broadcast.putExtra(EXTRA_PROGRESS, progress);
+
+        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+    }
+
+    private void sendProgressBroadcastStart() {
+
+        logi( "Sending progress broadcast start");
+
+        final Intent broadcast = new Intent(BROADCAST_START);
+
+        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+    }
+
+    private void sendProgressBroadcastComplete() {
+
+        logi( "Sending progress broadcast complete");
+
+        final Intent broadcast = new Intent(BROADCAST_COMPLETE);
+
+        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+    }
+
+    @Override
+    protected void onHandleIntent(@Nullable Intent intent) {
+        logi("onHandleIntent");
+
+        final String filePath = intent.getStringExtra("filepath");
+        final String deviceAddress = intent.getStringExtra("deviceAddress");
+        final int hardwareType = intent.getIntExtra("hardwareType", 1);
+        final boolean pf = intent.getBooleanExtra("pf", true);
+
+        partialFlash( filePath, deviceAddress, pf);
+        logi("onHandleIntent END");
+    }
+
+    /**
+     * Initializes bluetooth adapter
+     *
+     * @return <code>true</code> if initialization was successful
+     */
+    private boolean initialize() {
+        logi( "initialize");
+        // For API level 18 and above, get a reference to BluetoothAdapter through
+        // BluetoothManager.
+        final BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        if (bluetoothManager == null) {
+            return false;
+        }
+
+        mBluetoothAdapter = bluetoothManager.getAdapter();
+        if (mBluetoothAdapter == null) {
+            return false;
+        }
+
+        return true;
+    }
+
+    protected boolean isDebug() {
+        return false;
+    }
+
+    // ================================================================
+    // PARTIAL FLASH
 
     public static final UUID PARTIAL_FLASH_CHARACTERISTIC = UUID.fromString("e97d3b10-251d-470a-a062-fa1922dfa9a8");
     public static final UUID PARTIAL_FLASHING_SERVICE = UUID.fromString("e97dd91d-251d-470a-a062-fa1922dfa9a8");
@@ -53,10 +183,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final UUID MICROBIT_DFU_SERVICE = UUID.fromString("e95d93b0-251d-470a-a062-fa1922dfa9a8");
     private static final UUID MICROBIT_SECURE_DFU_SERVICE = UUID.fromString("0000fe59-0000-1000-8000-00805f9b34fb");
     private static final UUID MICROBIT_DFU_CHARACTERISTIC = UUID.fromString("e95d93b1-251d-470a-a062-fa1922dfa9a8");
-
-    private final static String TAG = PartialFlashingBaseService.class.getSimpleName();
-
-    public static final String BROADCAST_ACTION = "org.microbit.android.partialflashing.broadcast.BROADCAST_ACTION";
 
     private BluetoothManager mBluetoothManager;
     private BluetoothAdapter mBluetoothAdapter;
@@ -127,46 +253,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final int PF_ATTEMPT_DFU = 0x1;
     private static final int PF_FAILED = 0x2;
 
-    public final static String ACTION_GATT_CONNECTED =
-            "com.example.bluetooth.le.ACTION_GATT_CONNECTED";
-    public final static String ACTION_GATT_DISCONNECTED =
-            "com.example.bluetooth.le.ACTION_GATT_DISCONNECTED";
-    public final static String ACTION_GATT_SERVICES_DISCOVERED =
-            "com.example.bluetooth.le.ACTION_GATT_SERVICES_DISCOVERED";
-    public final static String ACTION_DATA_AVAILABLE =
-            "com.example.bluetooth.le.ACTION_DATA_AVAILABLE";
-    public final static String EXTRA_DATA =
-            "com.example.bluetooth.le.EXTRA_DATA";
-
-    static boolean DEBUG = false;
-
-    public void logi(String message) {
-        if( DEBUG) {
-            Log.i(TAG, "### " + Thread.currentThread().getId() + " # " + message);
-        }
-    }
-
-    protected boolean isDebug() {
-        return false;
-    }
-
-    @Override
-    public void onCreate() {
-        super.onCreate();
-
-        DEBUG = isDebug();
-
-        // Create intent filter and add to Local Broadcast Manager so that we can use an Intent to 
-        // start the Partial Flashing Service
-
-        final IntentFilter intentFilter = new IntentFilter();
-        intentFilter.addAction(PartialFlashingBaseService.BROADCAST_ACTION);
-
-        final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
-        manager.registerReceiver(broadcastReceiver, intentFilter);
-
-        initialize();
-    }
 
     // Various callback methods defined by the BLE API.
     private final BluetoothGattCallback mGattCallback =
@@ -359,42 +445,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
             };
 
-    public PartialFlashingBaseService() {
-      super(TAG);
-    }
-
-    public static final String BROADCAST_PROGRESS = "org.microbit.android.partialflashing.broadcast.BROADCAST_PROGRESS";
-    public static final String BROADCAST_START = "org.microbit.android.partialflashing.broadcast.BROADCAST_START";
-    public static final String BROADCAST_COMPLETE = "org.microbit.android.partialflashing.broadcast.BROADCAST_COMPLETE";
-    public static final String EXTRA_PROGRESS = "org.microbit.android.partialflashing.extra.EXTRA_PROGRESS";
-
-    private void sendProgressBroadcast(final int progress) {
-
-        logi( "Sending progress broadcast: " + progress + "%");
-
-        final Intent broadcast = new Intent(BROADCAST_PROGRESS);
-        broadcast.putExtra(EXTRA_PROGRESS, progress);
-
-        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
-    }
-
-    private void sendProgressBroadcastStart() {
-
-        logi( "Sending progress broadcast start");
-
-        final Intent broadcast = new Intent(BROADCAST_START);
-
-        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
-    }
-
-    private void sendProgressBroadcastComplete() {
-
-        logi( "Sending progress broadcast complete");
-
-        final Intent broadcast = new Intent(BROADCAST_COMPLETE);
-
-        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
-    }
 
     // Write to BLE Flash Characteristic
     public Boolean writePartialFlash(BluetoothGattCharacteristic partialFlashCharacteristic, byte[] data){
@@ -874,38 +924,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         return descriptorWriteSuccess;
     }
 
-    /**
-     * Initializes bluetooth adapter
-     *
-     * @return <code>true</code> if initialization was successful
-     */
-    private boolean initialize() {
-        // For API level 18 and above, get a reference to BluetoothAdapter through
-        // BluetoothManager.
-        final BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-        if (bluetoothManager == null) {
-            return false;
-        }
-
-        mBluetoothAdapter = bluetoothManager.getAdapter();
-        if (mBluetoothAdapter == null) {
-            return false;
-        }
-
-        return true;
-    }
-
-    public static final String BROADCAST_PF_FAILED = "org.microbit.android.partialflashing.broadcast.BROADCAST_PF_FAILED";
-    public static final String BROADCAST_PF_ATTEMPT_DFU = "org.microbit.android.partialflashing.broadcast.BROADCAST_PF_ATTEMPT_DFU";
-
-    @Override
-    protected void onHandleIntent(@Nullable Intent intent) {
-        logi( "Start Partial Flash");
-
-        final String filePath = intent.getStringExtra("filepath");
-        final String deviceAddress = intent.getStringExtra("deviceAddress");
-        final int hardwareType = intent.getIntExtra("hardwareType", 1);
-        final boolean pf = intent.getBooleanExtra("pf", true);
+    private void partialFlash( final String filePath, final String deviceAddress, final boolean pf) {
+        logi( "partialFlash");
 
         for ( int i = 0; i < 3; i++) {
             mBluetoothGatt = connect(deviceAddress);
@@ -1123,24 +1143,5 @@ public abstract class PartialFlashingBaseService extends IntentService {
         }
         return new String(hexChars);
     }
-
-    /* Receive updates on user interaction */
-    private BroadcastReceiver broadcastReceiver = new BroadcastReceiver() {
-
-        @Override
-        public void onReceive(Context context, final Intent intent) {
-            logi( "Received Broadcast: " + intent.toString());
-        }
-    };
-
-    @Override
-    public void onDestroy() {
-        super.onDestroy();
-        logi( "onDestroy");
-        final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
-        manager.unregisterReceiver(broadcastReceiver);
-    }
-    
-    protected abstract Class<? extends Activity> getNotificationTarget();
 }
 
