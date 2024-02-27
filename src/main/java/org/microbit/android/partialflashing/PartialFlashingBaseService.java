@@ -371,195 +371,192 @@ public abstract class PartialFlashingBaseService extends IntentService {
     }
 
     // Various callback methods defined by the BLE API.
-    private final BluetoothGattCallback mGattCallback =
-            new BluetoothGattCallback() {
-                @Override
-                public void onConnectionStateChange(BluetoothGatt gatt, int status,
-                                                    int newState) {
-                    logi( "onConnectionStateChange " + newState + " status " + status);
-                    //TODO this ignores status
+    private final BluetoothGattCallback mGattCallback = new BluetoothGattCallback() {
+        @Override
+        public void onConnectionStateChange(BluetoothGatt gatt, int status,
+                                            int newState) {
+            logi( "onConnectionStateChange " + newState + " status " + status);
+            //TODO this ignores status
 
-                    if (newState == BluetoothProfile.STATE_CONNECTED) {
-                        logi( "STATE_CONNECTED");
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                logi( "STATE_CONNECTED");
 
-                        mConnectionState = STATE_CONNECTED;
+                mConnectionState = STATE_CONNECTED;
 
-                        /* Taken from Nordic. See reasoning here: https://github.com/NordicSemiconductor/Android-DFU-Library/blob/e0ab213a369982ae9cf452b55783ba0bdc5a7916/dfu/src/main/java/no/nordicsemi/android/dfu/DfuBaseService.java#L888 */
-                        if (gatt.getDevice().getBondState() == BluetoothDevice.BOND_BONDED) {
-                            logi( "Wait for service changed");
-                            timeoutOnLock(1600);
-                            logi( "Bond timeout");
-                             // NOTE: This also works with shorter waiting time. The gatt.discoverServices() must be called after the indication is received which is
-                            // about 600ms after establishing connection. Values 600 - 1600ms should be OK.
-                        }
-                        final boolean success = gatt.discoverServices();
+                /* Taken from Nordic. See reasoning here: https://github.com/NordicSemiconductor/Android-DFU-Library/blob/e0ab213a369982ae9cf452b55783ba0bdc5a7916/dfu/src/main/java/no/nordicsemi/android/dfu/DfuBaseService.java#L888 */
+                if (gatt.getDevice().getBondState() == BluetoothDevice.BOND_BONDED) {
+                    logi( "Wait for service changed");
+                    timeoutOnLock(1600);
+                    logi( "Bond timeout");
+                    // NOTE: This also works with shorter waiting time. The gatt.discoverServices() must be called after the indication is received which is
+                    // about 600ms after establishing connection. Values 600 - 1600ms should be OK.
+                }
+                final boolean success = gatt.discoverServices();
 
-                        if (!success) {
-                            Log.e(TAG,"ERROR_SERVICE_DISCOVERY_NOT_STARTED");
-                            mConnectionState = STATE_ERROR;
-                        }
-                    } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                        mConnectionState = STATE_DISCONNECTED;
-                        Log.i(TAG, "Disconnected from GATT server.");
+                if (!success) {
+                    Log.e(TAG,"ERROR_SERVICE_DISCOVERY_NOT_STARTED");
+                    mConnectionState = STATE_ERROR;
+                }
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                mConnectionState = STATE_DISCONNECTED;
+                Log.i(TAG, "Disconnected from GATT server.");
+            }
+
+            // Clear any locks
+            synchronized (lock) {
+                lock.notifyAll();
+            }
+        }
+
+        @Override
+        // New services discovered
+        public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "onServicesDiscovered SUCCESS");
+                logi( String.valueOf(gatt.getServices()));
+                mConnectionState = STATE_CONNECTED_AND_READY;
+            } else {
+                Log.w(TAG, "onServicesDiscovered received: " + status);
+                mConnectionState = STATE_ERROR;
+            }
+
+            // Clear locks
+            synchronized (lock) {
+                lock.notifyAll();
+            }
+            logi( "onServicesDiscovered :: Cleared locks");
+        }
+        @Override
+        // API 31 Android 12
+        public void onServiceChanged (BluetoothGatt gatt) {
+            super.onServiceChanged( gatt);
+            logi( "onServiceChanged");
+        }
+        @Override
+        // Result of a characteristic read operation
+        public void onCharacteristicRead(BluetoothGatt gatt,
+                                         BluetoothGattCharacteristic characteristic,
+                                         int status) {
+            logi( String.valueOf(status));
+            synchronized (lock) {
+                lock.notifyAll();
+            }
+        }
+
+        @Override
+        public void onCharacteristicWrite(BluetoothGatt gatt,
+                                          BluetoothGattCharacteristic characteristic,
+                                          int status){
+            if(status == BluetoothGatt.GATT_SUCCESS) {
+                // Success
+                logi( "GATT status: Success");
+            } else {
+                // TODO Attempt to resend?
+                logi( "GATT WRITE ERROR. status:" + Integer.toString(status));
+            }
+            synchronized (lock) {
+                lock.notifyAll();
+            }
+        }
+
+        @Override
+        public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
+            super.onCharacteristicChanged(gatt, characteristic);
+            byte notificationValue[] = characteristic.getValue();
+            logi( "Received Notification: " + bytesToHex(notificationValue));
+
+            // What command
+            switch(notificationValue[0])
+            {
+                case REGION_INFO_COMMAND: {
+                    // Get Hash + Start / End addresses
+                    logi( "Region: " + notificationValue[1]);
+
+                    byte[] startAddress = Arrays.copyOfRange(notificationValue, 2, 6);
+                    byte[] endAddress = Arrays.copyOfRange(notificationValue, 6, 10);
+                    logi( "startAddress: " + bytesToHex(startAddress) + " endAddress: " + bytesToHex(endAddress));
+
+                    if ( notificationValue[1] == REGION_MAKECODE) {
+                        code_startAddress = Byte.toUnsignedLong(notificationValue[5])
+                                + Byte.toUnsignedLong(notificationValue[4]) * 256
+                                + Byte.toUnsignedLong(notificationValue[3]) * 256 * 256
+                                + Byte.toUnsignedLong(notificationValue[2]) * 256 * 256 * 256;
+
+                        code_endAddress = Byte.toUnsignedLong(notificationValue[9])
+                                + Byte.toUnsignedLong(notificationValue[8]) * 256
+                                + Byte.toUnsignedLong(notificationValue[7]) * 256 * 256
+                                + Byte.toUnsignedLong(notificationValue[6]) * 256 * 256 * 256;
                     }
 
-                    // Clear any locks
+                    byte[] hash = Arrays.copyOfRange(notificationValue, 10, 18);
+                    logi( "Hash: " + bytesToHex(hash));
+
+                    // If Region is DAL get HASH
+                    if (notificationValue[1] == REGION_DAL && python == false)
+                        dalHash = bytesToHex(hash);
+
+                    if (notificationValue[1] == REGION_DAL && python == true)
+                        dalHash = bytesToHex(hash);
+
+                    synchronized (region_lock) {
+                        region_lock.notifyAll();
+                    }
+
+                    break;
+                }
+                case FLASH_COMMAND: {
+                    packetState = notificationValue[1];
                     synchronized (lock) {
                         lock.notifyAll();
                     }
                 }
+            }
+        }
 
-                @Override
-                // New services discovered
-                public void onServicesDiscovered(BluetoothGatt gatt, int status) {
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        Log.w(TAG, "onServicesDiscovered SUCCESS");
-                        logi( String.valueOf(gatt.getServices()));
-                        mConnectionState = STATE_CONNECTED_AND_READY;
-                    } else {
-                        Log.w(TAG, "onServicesDiscovered received: " + status);
-                        mConnectionState = STATE_ERROR;
-                    }
+        @Override
+        public void onDescriptorRead (BluetoothGatt gatt,
+                                      BluetoothGattDescriptor descriptor,
+                                      int status,
+                                      byte[] value) {
+            logi( "onDescriptorRead :: " + status);
 
-                    // Clear locks
-                    synchronized (lock) {
-                        lock.notifyAll();
-                    }
-                    logi( "onServicesDiscovered :: Cleared locks");
-                }
-                @Override
-                // API 31 Android 12
-                public void onServiceChanged (BluetoothGatt gatt) {
-                    super.onServiceChanged( gatt);
-                    logi( "onServiceChanged");
-                }
-                @Override
-                // Result of a characteristic read operation
-                public void onCharacteristicRead(BluetoothGatt gatt,
-                                                 BluetoothGattCharacteristic characteristic,
-                                                 int status) {
-                    logi( String.valueOf(status));
-                    synchronized (lock) {
-                        lock.notifyAll();
-                    }
-                }
+            if(status == BluetoothGatt.GATT_SUCCESS) {
+                logi( "Descriptor read success");
+                logi( "GATT: " + gatt.toString() + ", Desc: " + descriptor.toString() + ", Status: " + status);
+                descriptorReadSuccess = true;
+                descriptorRead = descriptor;
+                descriptorValue = value;
+            } else {
+                logi( "onDescriptorRead: " + status);
+            }
 
-                @Override
-                public void onCharacteristicWrite(BluetoothGatt gatt,
-                                                BluetoothGattCharacteristic characteristic,
-                                                int status){
-                    if(status == BluetoothGatt.GATT_SUCCESS) {
-                        // Success
-                        logi( "GATT status: Success");
-                    } else {
-                        // TODO Attempt to resend?
-                        logi( "GATT WRITE ERROR. status:" + Integer.toString(status));
-                    }
-                    synchronized (lock) {
-                        lock.notifyAll();
-                    }
-                }
+            synchronized (lock) {
+                lock.notifyAll();
+                logi( "onDescriptorWrite :: clear locks");
+            }
 
-                @Override
-                public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
-                    super.onCharacteristicChanged(gatt, characteristic);
-                    byte notificationValue[] = characteristic.getValue();
-                    logi( "Received Notification: " + bytesToHex(notificationValue));
+        }
 
-                    // What command
-                    switch(notificationValue[0])
-                    {
-                        case REGION_INFO_COMMAND: {
-                            // Get Hash + Start / End addresses
-                            logi( "Region: " + notificationValue[1]);
+        @Override
+        public void onDescriptorWrite (BluetoothGatt gatt,
+                                       BluetoothGattDescriptor descriptor,
+                                       int status){
+            logi( "onDescriptorWrite :: " + status);
 
-                            byte[] startAddress = Arrays.copyOfRange(notificationValue, 2, 6);
-                            byte[] endAddress = Arrays.copyOfRange(notificationValue, 6, 10);
-                            logi( "startAddress: " + bytesToHex(startAddress) + " endAddress: " + bytesToHex(endAddress));
+            if(status == BluetoothGatt.GATT_SUCCESS) {
+                logi( "Descriptor success");
+                logi( "GATT: " + gatt.toString() + ", Desc: " + descriptor.toString() + ", Status: " + status);
+                descriptorWriteSuccess = true;
+            } else {
+                logi( "onDescriptorWrite: " + status);
+            }
 
-                            if ( notificationValue[1] == REGION_MAKECODE) {
-                                code_startAddress = Byte.toUnsignedLong(notificationValue[5])
-                                        + Byte.toUnsignedLong(notificationValue[4]) * 256
-                                        + Byte.toUnsignedLong(notificationValue[3]) * 256 * 256
-                                        + Byte.toUnsignedLong(notificationValue[2]) * 256 * 256 * 256;
-
-                                code_endAddress = Byte.toUnsignedLong(notificationValue[9])
-                                        + Byte.toUnsignedLong(notificationValue[8]) * 256
-                                        + Byte.toUnsignedLong(notificationValue[7]) * 256 * 256
-                                        + Byte.toUnsignedLong(notificationValue[6]) * 256 * 256 * 256;
-                            }
-
-                            byte[] hash = Arrays.copyOfRange(notificationValue, 10, 18);
-                            logi( "Hash: " + bytesToHex(hash));
-
-                            // If Region is DAL get HASH
-                            if (notificationValue[1] == REGION_DAL && python == false)
-                                dalHash = bytesToHex(hash);
-
-                            if (notificationValue[1] == REGION_DAL && python == true)
-                                dalHash = bytesToHex(hash);
-
-                            synchronized (region_lock) {
-                                region_lock.notifyAll();
-                            }
-
-                            break;
-                        }
-                        case FLASH_COMMAND: {
-                            packetState = notificationValue[1];
-                            synchronized (lock) {
-                                lock.notifyAll();
-                            }
-                        }
-                    }
-                }
-
-                @Override
-                public void onDescriptorRead (BluetoothGatt gatt,
-                                              BluetoothGattDescriptor descriptor,
-                                              int status,
-                                              byte[] value) {
-                    logi( "onDescriptorRead :: " + status);
-
-                    if(status == BluetoothGatt.GATT_SUCCESS) {
-                        logi( "Descriptor read success");
-                        logi( "GATT: " + gatt.toString() + ", Desc: " + descriptor.toString() + ", Status: " + status);
-                        descriptorReadSuccess = true;
-                        descriptorRead = descriptor;
-                        descriptorValue = value;
-                    } else {
-                        logi( "onDescriptorRead: " + status);
-                    }
-
-                    synchronized (lock) {
-                        lock.notifyAll();
-                        logi( "onDescriptorWrite :: clear locks");
-                    }
-
-                }
-
-                @Override
-                public void onDescriptorWrite (BluetoothGatt gatt,
-                                        BluetoothGattDescriptor descriptor,
-                                        int status){
-                    logi( "onDescriptorWrite :: " + status);
-
-                    if(status == BluetoothGatt.GATT_SUCCESS) {
-                        logi( "Descriptor success");
-                        logi( "GATT: " + gatt.toString() + ", Desc: " + descriptor.toString() + ", Status: " + status);
-                        descriptorWriteSuccess = true;
-                    } else {
-                        logi( "onDescriptorWrite: " + status);
-                    }
-
-                    synchronized (lock) {
-                        lock.notifyAll();
-                        logi( "onDescriptorWrite :: clear locks");
-                    }
-
-                }
-
-            };
+            synchronized (lock) {
+                lock.notifyAll();
+                logi( "onDescriptorWrite :: clear locks");
+            }
+        }
+    };
 
 
     // Write to BLE Flash Characteristic
