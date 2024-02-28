@@ -183,6 +183,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private BluetoothAdapter mBluetoothAdapter;
     private BluetoothGatt mBluetoothGatt = null;
     private int mConnectionState = STATE_DISCONNECTED;
+    private boolean mWaitingForServices = false;
     private boolean descriptorWriteSuccess = false;
     BluetoothGattDescriptor descriptorRead = null;
     boolean descriptorReadSuccess = false;
@@ -365,7 +366,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
         public void onConnectionStateChange(BluetoothGatt gatt, int status,
                                             int newState) {
             logi( "onConnectionStateChange " + newState + " status " + status);
-            //TODO this ignores status
+            if ( status != 0) {
+                logi("ERROR - status");
+                mConnectionState = STATE_ERROR;;
+                return;
+            }
 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 logi( "STATE_CONNECTED");
@@ -381,6 +386,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     // about 600ms after establishing connection. Values 600 - 1600ms should be OK.
                 }
                 logi( "Calling gatt.discoverServices()");
+                mWaitingForServices = true;
                 final boolean success = gatt.discoverServices();
                 if (!success) {
                     Log.e(TAG,"ERROR_SERVICE_DISCOVERY_NOT_STARTED");
@@ -400,20 +406,22 @@ public abstract class PartialFlashingBaseService extends IntentService {
         @Override
         // New services discovered
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.w(TAG, "onServicesDiscovered SUCCESS");
-                logi( String.valueOf(gatt.getServices()));
-                mConnectionState = STATE_CONNECTED_AND_READY;
-            } else {
-                Log.w(TAG, "onServicesDiscovered received: " + status);
-                mConnectionState = STATE_ERROR;
+            logi("onServicesDiscovered status " + status);
+            if ( status != 0) {
+                logi("ERROR - status");
+                mConnectionState = STATE_ERROR;;
+                return;
             }
 
-            // Clear locks
-            synchronized (lock) {
-                lock.notifyAll();
+            if ( mWaitingForServices) {
+                mWaitingForServices = false;
+                mConnectionState = STATE_CONNECTED_AND_READY;
+                // Clear locks
+                synchronized (lock) {
+                    lock.notifyAll();
+                }
+                logi("onServicesDiscovered :: Cleared locks");
             }
-            logi( "onServicesDiscovered :: Cleared locks");
         }
         @Override
         // API 31 Android 12
@@ -840,6 +848,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
         long start = SystemClock.elapsedRealtime();
 
         mConnectionState = STATE_CONNECTING;
+        mWaitingForServices = false;
         int stateWas = mConnectionState;
 
         final BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(address);
@@ -964,6 +973,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     refresh.invoke(mBluetoothGatt);
                 } catch (final Exception e) {
                 }
+                mWaitingForServices = true;
                 mBluetoothGatt.discoverServices();
                 lockWait(2000);
             }
