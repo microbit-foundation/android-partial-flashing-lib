@@ -368,7 +368,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
             logi( "onConnectionStateChange " + newState + " status " + status);
             if ( status != 0) {
                 logi("ERROR - status");
-                mConnectionState = STATE_ERROR;;
+                mConnectionState = STATE_ERROR;
+                // Clear locks
+                synchronized (lock) {
+                    lock.notifyAll();
+                }
                 return;
             }
 
@@ -409,7 +413,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
             logi("onServicesDiscovered status " + status);
             if ( status != 0) {
                 logi("ERROR - status");
-                mConnectionState = STATE_ERROR;;
+                mConnectionState = STATE_ERROR;
+                // Clear locks
+                synchronized (lock) {
+                    lock.notifyAll();
+                }
                 return;
             }
 
