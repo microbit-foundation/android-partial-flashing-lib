@@ -26,8 +26,11 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.UUID;
+import java.util.zip.CRC32;
 
 /**
  * A class to communicate with and flash the micro:bit without having to transfer the entire HEX file
@@ -167,6 +170,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
     public static final UUID PARTIAL_FLASHING_SERVICE = UUID.fromString("e97dd91d-251d-470a-a062-fa1922dfa9a8");
     public static final String PXT_MAGIC = "708E3B92C615A841C49866C975EE5197";
     public static final String UPY_MAGIC = ".*FE307F59.{16}9DD7B1C1.*";
+    public static final String UPY_MAGIC1 = "FE307F59";
+    public static final String UPY_MAGIC2 = "9DD7B1C1";
 
     private static final UUID NORDIC_DFU_SERVICE = UUID.fromString("00001530-1212-EFDE-1523-785FEABCD123");
     private static final UUID MICROBIT_DFU_SERVICE = UUID.fromString("e95d93b0-251d-470a-a062-fa1922dfa9a8");
@@ -176,7 +181,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
     // values for writeCharacteristic
     private static final int WITH_RESPONSE = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
     private static final int NO_RESPONSE = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE;
-    private final static int BLE_SUCCESS = 0;
+    private final static int BLE_PENDING = -1;
     private final static int BLE_ERROR_UNKNOWN = Integer.MAX_VALUE;
 
     private BluetoothManager mBluetoothManager;
@@ -188,6 +193,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
     BluetoothGattDescriptor descriptorRead = null;
     boolean descriptorReadSuccess = false;
     byte[] descriptorValue = null;
+
+    private int onWriteCharacteristicStatus = BLE_PENDING;
 
     BluetoothGattService pfService;
     BluetoothGattCharacteristic partialFlashCharacteristic;
@@ -218,12 +225,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final int REGION_MAKECODE = 2;
 
     // DAL Hash
-    boolean python = false;
-    String dalHash;
-
-    long code_startAddress = 0;
-
-    long code_endAddress = 0;
+    private boolean python = false;
+    private String dalHash;
+    private String fileHash;
+    private long code_startAddress = 0;
+    private long code_endAddress = 0;
 
     // Partial Flashing Commands
     private static final byte REGION_INFO_COMMAND = 0x0;
@@ -368,7 +374,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
             logi( "onConnectionStateChange " + newState + " status " + status);
             if ( status != 0) {
                 logi("ERROR - status");
-                mConnectionState = STATE_ERROR;;
+                mConnectionState = STATE_ERROR;
+                // Clear locks
+                synchronized (lock) {
+                    lock.notifyAll();
+                }
                 return;
             }
 
@@ -409,11 +419,22 @@ public abstract class PartialFlashingBaseService extends IntentService {
             logi("onServicesDiscovered status " + status);
             if ( status != 0) {
                 logi("ERROR - status");
-                mConnectionState = STATE_ERROR;;
+                mConnectionState = STATE_ERROR;
+                // Clear locks
+                synchronized (lock) {
+                    lock.notifyAll();
+                }
                 return;
             }
 
             if ( mWaitingForServices) {
+                if (gatt.getService(UUID.fromString("0000fe59-0000-1000-8000-00805f9b34fb")) != null) {
+                    logi("Hardware Type: V2");
+                    hardwareType = MICROBIT_V2;
+                } else {
+                    logi("Hardware Type: V1");
+                    hardwareType = MICROBIT_V1;
+                }
                 mWaitingForServices = false;
                 mConnectionState = STATE_CONNECTED_AND_READY;
                 // Clear locks
@@ -445,7 +466,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         public void onCharacteristicWrite(BluetoothGatt gatt,
                                           BluetoothGattCharacteristic characteristic,
                                           int status){
-            logi( "onCharacteristicWrite status " + status);
+            logi( "onCharacteristicWrite status " + status + " " + characteristic.getUuid());
+            onWriteCharacteristicStatus = status;
             if(status == BluetoothGatt.GATT_SUCCESS) {
                 // Success
                 logi( "GATT status: Success");
@@ -461,7 +483,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
             super.onCharacteristicChanged(gatt, characteristic);
-            logi( "onCharacteristicChanged");
+            logi( "onCharacteristicChanged " + characteristic.getUuid());
             
             byte notificationValue[] = characteristic.getValue();
             logi( "Received Notification: " + bytesToHex(notificationValue));
@@ -558,14 +580,41 @@ public abstract class PartialFlashingBaseService extends IntentService {
             }
         }
     };
-    
+
+    /**
+     * Wait for up to 15ms for onWriteCharacteristic to be called
+     *
+     * onWriteCharacteristic is called even for NO_RESPONSE
+     *
+     * In a command and response sequence
+     * onWriteCharacteristic may be called before or after onCharacteristicChanged
+     *
+     * Calling writeCharacteristic again before onWriteCharacteristic
+     * returns ERROR_GATT_WRITE_REQUEST_BUSY
+     *
+     * @return status
+     */
+    private int waitForOnWriteCharacteristic() throws InterruptedException {
+        for ( int i = 0; i < 5; i++) {
+            if ( onWriteCharacteristicStatus != BLE_PENDING) {
+                break;
+            }
+            logi( "waitForOnWriteCharacteristic #" + i);
+            Thread.sleep(3);
+        }
+        logi( "waitForOnWriteCharacteristic = " + onWriteCharacteristicStatus);
+        return onWriteCharacteristicStatus;
+    }
+
+
     @SuppressLint("MissingPermission")
     private int writeCharacteristic( BluetoothGattCharacteristic c, byte[] data, int writeType) {
         logi( "writeCharacteristic " + c.getUuid() + " writeType " + writeType);
+        onWriteCharacteristicStatus = BLE_PENDING;
         if ( Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             c.setWriteType( writeType);
             c.setValue(data);
-            int status = mBluetoothGatt.writeCharacteristic(c) ? BLE_SUCCESS : BLE_ERROR_UNKNOWN;
+            int status = mBluetoothGatt.writeCharacteristic(c) ? BluetoothGatt.GATT_SUCCESS : BLE_ERROR_UNKNOWN;
             logi( "writeCharacteristic status " + status);
             return status;
         }
@@ -576,11 +625,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
     }
 
     // Write to BLE Flash Characteristic
-    public int writePartialFlash( byte[] data, int writeType) {
+    private int writeCharacteristicPF( byte[] data, int writeType) {
         return writeCharacteristic( partialFlashCharacteristic, data, writeType);
     }
 
-    public int attemptPartialFlash(String filePath) {
+    private int attemptPartialFlash(String filePath) {
         logi( "Flashing: " + filePath);
 
         sendProgressBroadcastStart();
@@ -591,36 +640,21 @@ public abstract class PartialFlashingBaseService extends IntentService {
             logi( filePath);
             HexUtils hex = new HexUtils(filePath);
             logi( "searchForData()");
-            String hash = "";
-            int magicPart  = 0;
-            int magicIndex = hex.searchForData(PXT_MAGIC);
-            if (magicIndex > -1) {
-                python = false;
-                String magicData = hex.getDataFromIndex(magicIndex);
-                magicPart = magicData.indexOf(PXT_MAGIC);
-                int hashStart = magicPart + PXT_MAGIC.length();
-                int hashNext = hashStart + 16;
-                if ( hashStart < magicData.length()) {
-                    if ( hashNext < magicData.length())
-                        hash = magicData.substring( hashStart, hashNext);
-                    else
-                        hash = magicData.substring( hashStart);
+            python = false;
+            HexPos dataPos = findMakeCodeData( hex);
+            if ( dataPos == null) {
+                dataPos = findPythonData( hex);
+                if ( dataPos != null) {
+                    python = true;
                 }
-                if ( hash.length() < 16) {
-                    String nextData = hex.getDataFromIndex( magicIndex + 1);
-                    hash = hash + nextData.substring( 0, 16 - hash.length());
-                }
-            } else {
-//                magicIndex = hex.searchForDataRegEx(UPY_MAGIC);
-//                python = true;
             }
 
-            if (magicIndex == -1) {
-                logi( "No magic");
+            if ( dataPos == null) {
+                logi( "No partial flash data");
                 return PF_ATTEMPT_DFU;
             }
 
-            logi( "Found PXT_MAGIC at " + magicIndex + " at offset " + magicPart);
+            logi( "Found partial flash data at " + dataPos.line + " at offset " + dataPos.part);
 
             // Get Memory Map from Microbit
             code_startAddress = code_endAddress = 0;
@@ -629,66 +663,31 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 Log.w(TAG, "Failed to read memory map");
                 return PF_ATTEMPT_DFU;
             }
-            // TODO: readMemoryMap may still have failed - more checks are needed
+
+            if ( code_startAddress == 0 || code_endAddress <= code_startAddress)
+            {
+                logi( "Failed to read memory map code address");
+                return PF_ATTEMPT_DFU;
+            }
 
             // Compare DAL hash
-            if( !python) {
-                if ( code_startAddress == 0 || code_endAddress <= code_startAddress)
-                {
-                    logi( "Failed to read memory map code address");
-                    return PF_ATTEMPT_DFU;
-                }
-                if (!hash.equals(dalHash)) {
-                    logi( hash + " " + (dalHash));
-                    return PF_ATTEMPT_DFU;
-                }
-            } else {
-                magicIndex = magicIndex - 3;
-
-                int record_length = hex.getRecordDataLengthFromIndex(magicIndex);
-                logi( "Length of record: " + record_length);
-
-                int magic_offset = (record_length == 64) ? 32 : 0;
-                String hashes = hex.getDataFromIndex(magicIndex + ((record_length == 64) ? 0 : 1)); // Size of rows
-                int chunks_per_line = magic_offset / 16;
-
-                logi( hashes);
-
-                if (hashes.charAt(3) == '2') {
-                    // Uses a hash pointer. Create regex and extract from hex
-                    String regEx = ".*" +
-                            dalHash +
-                            ".*";
-                    int hashIndex = hex.searchForDataRegEx(regEx);
-
-                    // TODO Uses CRC of hash
-                    if (hashIndex == -1) {
-                        // return PF_ATTEMPT_DFU;
-                    }
-                    // hashes = hex.getDataFromIndex(hashIndex);
-                    // logi( "hash: " + hashes);
-                } else if (!hashes.substring(magic_offset, magic_offset + 16).equals(dalHash)) {
-                    logi( hashes.substring(magic_offset, magic_offset + 16) + " " + (dalHash));
-                    return PF_ATTEMPT_DFU;
-                }
+            if ( !fileHash.equals( dalHash)) {
+                logi( "Hash " + fileHash + " != " + ( dalHash));
+                return PF_ATTEMPT_DFU;
             }
 
             int count = 0;
-            int numOfLines = hex.numOfLines() - magicIndex;
+            int numOfLines = hex.numOfLines() - dataPos.line;
             logi( "Total lines: " + numOfLines);
-
-            int  magicLo = hex.getRecordAddressFromIndex(magicIndex);
-            int  magicHi = hex.getSegmentAddress(magicIndex);
-            long magicA   = (long) magicLo + (long) magicHi * 256 * 256 + magicPart;
 
             int packetNum = 0;
             int lineCount = 0;
-            int part = magicPart; // magic is first data to be copied
+            int part = dataPos.part;
             int line0 = lineCount;
             int part0 = part;
 
-            int  addrLo = hex.getRecordAddressFromIndex(magicIndex + lineCount);
-            int  addrHi = hex.getSegmentAddress(magicIndex + lineCount);
+            int  addrLo = hex.getRecordAddressFromIndex( dataPos.line + lineCount);
+            int  addrHi = hex.getSegmentAddress(dataPos.line + lineCount);
             long addr   = (long) addrLo + (long) addrHi * 256 * 256;
 
             String hexData;
@@ -710,6 +709,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 return PF_ATTEMPT_DFU;
             }
 
+            // TODO - check size of code in file matches micro:bit
+
             long startTime = SystemClock.elapsedRealtime();
             while (true) {
                 // Timeout if total is > 30 seconds
@@ -719,15 +720,15 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 }
 
                 // Check if EOF
-                if(hex.getRecordTypeFromIndex(magicIndex + lineCount) != 0) {
+                if(hex.getRecordTypeFromIndex( dataPos.line + lineCount) != 0) {
                     break;
                 }
 
-                addrLo = hex.getRecordAddressFromIndex(magicIndex + lineCount);
-                addrHi = hex.getSegmentAddress(magicIndex + lineCount);
+                addrLo = hex.getRecordAddressFromIndex( dataPos.line + lineCount);
+                addrHi = hex.getSegmentAddress(dataPos.line + lineCount);
                 addr   = (long) addrLo + (long) addrHi * 256 * 256;
 
-                hexData = hex.getDataFromIndex( magicIndex + lineCount);
+                hexData = hex.getDataFromIndex( dataPos.line + lineCount);
                 if ( part + 32 > hexData.length()) {
                     partData = hexData.substring( part);
                 } else {
@@ -750,15 +751,17 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 logi( packetNum + " " + count + " addr0 " + addr0 + " offsetToSend " + offsetToSend + " line " + lineCount + " addr " + addr + " part " + part + " data " + partData);
 
                 // recordToByteArray() builds a PF command block with the data
-                byte chunk[] = HexUtils.recordToByteArray(partData, offsetToSend, packetNum);
+                byte[] chunk = HexUtils.recordToByteArray(partData, offsetToSend, packetNum);
 
                 // Write without response
                 // Wait for previous write to complete
-                int writeStatus = writePartialFlash( chunk, NO_RESPONSE);
+                int writeStatus = writeCharacteristicPF( chunk, NO_RESPONSE);
 
                 // Sleep after 4 packets
                 count++;
-                if ( count == 4){
+                if ( count != 4) {
+                    waitForOnWriteCharacteristic();
+                } else {
                     count = 0;
 
                     // Wait for notification
@@ -782,9 +785,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     packetState = PACKET_STATE_WAITING;
 
                     logi( "/Wait for notification");
-
-                } else {
-                    Thread.sleep(5);
                 }
 
                 // If notification is retransmit -> retransmit last block.
@@ -809,7 +809,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
             // Write End of Flash packet
             byte[] endOfFlashPacket = {(byte)0x02};
-            int writeStatus = writePartialFlash( endOfFlashPacket, NO_RESPONSE);
+            int writeStatus = writeCharacteristicPF( endOfFlashPacket, NO_RESPONSE);
 
             Thread.sleep(100); // allow time for write to complete
 
@@ -836,6 +836,254 @@ public abstract class PartialFlashingBaseService extends IntentService {
         }
 
         return PF_SUCCESS;
+    }
+
+    private class HexPos {
+        public int line;
+        public int part; // offset into line data in characters
+        public int sizeBytes;
+        public void hexPos() {
+            line = -1;
+            part = -1;
+            sizeBytes = 0;
+        }
+    }
+
+    private HexPos findMakeCodeData( HexUtils hex) throws IOException {
+        HexPos pos = new HexPos();
+        pos.line = hex.searchForData(PXT_MAGIC);
+        if ( pos.line < 0) {
+            return null;
+        }
+        String magicData = hex.getDataFromIndex( pos.line);
+        pos.part = magicData.indexOf(PXT_MAGIC);
+        long hdrAddress = hexPosToAddress( hex, pos);
+        long hashAddress = hdrAddress + PXT_MAGIC.length() / 2;
+        HexPos hashPos = hexAddressToPos( hex, hashAddress);
+        if ( hashPos == null) {
+            return null;
+        }
+        hashPos.sizeBytes =  8;
+        fileHash = hexGetData( hex, hashPos);
+        if ( fileHash.length() < 8 * 2) {  // 16 bytes
+            return null;
+        }
+        // TODO - find end of data pos.sizeBytes
+        return pos;
+    }
+
+    //    Micropython region table
+    //    https://github.com/microbit-foundation/micropython-microbit-v2/blob/a76e1413bcd66f128a31d98756fc3d1f336d1580/src/addlayouttable.py
+
+    public final static int PYTHON_HEADER_SIZE = 16;
+    public final static int PYTHON_REGION_SIZE = 16;
+
+    private HexPos findPythonData( HexUtils hex) throws IOException {
+        HexPos pos = new HexPos();
+        pos.line = hex.searchForDataRegEx(UPY_MAGIC);
+        if ( pos.line < 0) {
+            return null;
+        }
+        String header = hex.getDataFromIndex( pos.line);
+        pos.part = header.indexOf(UPY_MAGIC1);
+        pos.sizeBytes = PYTHON_HEADER_SIZE;
+        header = hexGetData( hex, pos);
+        if ( header.length() < PYTHON_HEADER_SIZE * 2) {
+            return null;
+        }
+        int version     = hexToUint16( header, 8);
+        int table_len   = hexToUint16( header, 12);
+        int num_reg     = hexToUint16( header, 16);
+        int pageLog2    = hexToUint16( header, 20);
+        if ( version != 1) {
+            return null;
+        }
+        if ( table_len != num_reg * 16) {
+            return null;
+        }
+        int page = hardwareType == MICROBIT_V1 ? 0x400 : 0x1000;
+        if ( 1 << pageLog2 != page) {
+            return null;
+        }
+
+        long codeStart = -1;
+        long codeLength = -1;
+
+        long hdrAddress = hexPosToAddress( hex, pos);
+        for ( int regionIndex = 0; regionIndex < num_reg; regionIndex++)
+        {
+            long regionAddress = hdrAddress - table_len + (long) ( regionIndex * PYTHON_REGION_SIZE);
+            pos = hexAddressToPos( hex, regionAddress);
+            if ( pos == null) {
+                return null;
+            }
+            pos.sizeBytes =  PYTHON_REGION_SIZE;
+            String region = hexGetData( hex, pos);
+            if ( region.length() < PYTHON_REGION_SIZE * 2) {
+                return null;
+            }
+            int regionID    = hexToUint8(  region, 0);
+            int hashType    = hexToUint8(  region, 2);
+            int startPage   = hexToUint16( region, 4);
+            long length     = hexToUint32( region, 8);
+            long hashPtr    = hexToUint32( region, 16);
+            String hash     = region.substring( 16, 32);
+
+            // Extract regionHash
+            String regionHash = null;
+            switch ( hashType)
+            {
+                default:
+                    // Unknown
+                    return null;
+                case 0:
+                    //hash data is empty
+                    break;
+                case 1:
+                    // hash data contains 8 bytes of verbatim data
+                    regionHash = hash;
+                    break;
+                case 2: {
+                    // hash data contains a 4-byte pointer to a string of up tp 100 chars
+                    // hash is the crc32 of the string
+                    HexPos hashPos = hexAddressToPos( hex, hashPtr);
+                    if ( hashPos == null) {
+                        return null;
+                    }
+                    hashPos.sizeBytes = 100;
+                    String hashData = hexGetData( hex, hashPos);
+                    if ( hashData.isEmpty()) {
+                        return null;
+                    }
+                    int strLen = 0;
+                    while ( strLen < hashData.length() / 2) {
+                        int chr = hexToUint8( hashData, strLen * 2);
+                        if ( chr == 0) {
+                            break;
+                        }
+                        strLen++;
+                    }
+                    byte [] strBytes = new byte[ strLen];
+                    for ( int i = 0; i < strLen; i++) {
+                        int chr = hexToUint8( hashData, i * 2);
+                        strBytes[i] = (byte) chr;
+                    }
+                    CRC32 crc32 = new CRC32();
+                    crc32.update( strBytes);
+                    long crc = crc32.getValue();
+                    byte [] hashBytes = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong( crc).array();
+                    regionHash = bytesToHex( hashBytes);
+                    break;
+                }
+            }
+
+            // Use regionHash from app region and code start & end from file system
+            switch ( regionID)
+            {
+                case 1: // softdevice
+                    break;
+                case 2: // micropython app
+                    fileHash = regionHash;
+                    break;
+                case 3: // file system
+                    codeStart = (long) startPage * page;
+                    codeLength = length;
+                    break;
+            }
+        }
+
+        if ( codeStart < 0 || codeLength < 0) {
+            return null;
+        }
+        int index = hex.searchForAddress( codeStart);
+        pos = hexAddressToPos( hex, codeStart);
+        if ( pos == null) {
+            return null;
+        }
+        pos.sizeBytes = (int) codeLength;
+        return pos;
+    }
+
+    private long hexPosToAddress( HexUtils hex, HexPos pos) throws IOException {
+        int addrLo = hex.getRecordAddressFromIndex( pos.line);
+        int addrHi = hex.getSegmentAddress(pos.line);
+        long addr = (long) addrLo + (long) addrHi * 256 * 256;
+        return addr + pos.part / 2;
+    }
+
+    private HexPos hexAddressToPos( HexUtils hex, long address) throws IOException {
+        HexPos pos = new HexPos();
+        pos.line = hex.searchForAddress( address);
+        if ( pos.line < 0) {
+            return null;
+        }
+        int lineAddr = hex.getRecordAddressFromIndex( pos.line);
+        long addressLo = address % 0x10000;
+        long offset = addressLo - lineAddr;
+        pos.part = (int) offset * 2;
+        return pos;
+    }
+
+    private String hexGetData( HexUtils hex, final HexPos pos) throws IOException {
+        StringBuilder data = new StringBuilder();
+        int line = pos.line;
+        int part = pos.part;
+        int size = pos.sizeBytes * 2; // 2 characters per byte
+        while ( size > 0) {
+            int type = hex.getRecordTypeFromIndex( line);
+            if ( type != 0 && type != 0x0D) {
+                line++;
+                part = 0;
+            } else {
+                String lineData = hex.getDataFromIndex(line);
+                int len = lineData.length();
+                int chunk = Math.min(len - part, size);
+                if (chunk > 0) {
+                    data.append(lineData.substring(part, part + chunk));
+                    part += chunk;
+                    size -= chunk;
+                }
+                if (size > 0 && part >= len) {
+                    line += 1;
+                    part = 0;
+                    if (line >= hex.numOfLines()) {
+                        break;
+                    }
+                }
+            }
+        }
+        return data.toString();
+    }
+
+    private static int hexToUint8( String hex, int idx) {
+        int hi = Character.digit( hex.charAt( idx), 16);
+        int lo = Character.digit( hex.charAt( idx + 1), 16);
+        if ( lo < 0 || hi < 0) {
+            return -1;
+        }
+        return hi * 16 + lo;
+    }
+
+    private static int hexToUint16( String hex, int idx)
+    {
+        int lo = hexToUint8( hex, idx);
+        int hi = hexToUint8( hex, idx + 2);
+        if ( lo < 0 || hi < 0) {
+            return -1;
+        }
+        return hi * 256 + lo;
+    }
+
+    private static long hexToUint32( String hex, int idx)
+    {
+        long b0 = hexToUint8( hex, idx);
+        long b1 = hexToUint8( hex, idx + 2);
+        long b2 = hexToUint8( hex, idx + 4);
+        long b3 = hexToUint8( hex, idx + 6);
+        if ( b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0) {
+            return -1;
+        }
+        return b0 + b1 * 0x100 + b2 * 0x10000 + b3 * 0x1000000;
     }
 
     @SuppressLint("MissingPermission")
@@ -1131,17 +1379,19 @@ public abstract class PartialFlashingBaseService extends IntentService {
             {
                 // Get Start, End, and Hash of each Region
                 // Request Region
+                logi( "Request Region " + i);
                 byte[] payload = {REGION_INFO_COMMAND, (byte)i};
                 if(partialFlashCharacteristic == null || mBluetoothGatt == null) return false;
-                int status = writePartialFlash( payload, WITH_RESPONSE);
-                if( status != BLE_SUCCESS) {
-                    logi( "Failed to write to Region characteristic");
+                int status = writeCharacteristicPF( payload, WITH_RESPONSE);
+                if( status != BluetoothGatt.GATT_SUCCESS) {
+                    logi( "Failed to write to Region characteristic " + i);
                     return false;
                 }
-                logi( "Request Region " + i);
-
                 synchronized (region_lock) {
                     region_lock.wait(2000);
+                }
+                if ( waitForOnWriteCharacteristic() != BluetoothGatt.GATT_SUCCESS) {
+                    return false;
                 }
             }
         } catch (Exception e){
