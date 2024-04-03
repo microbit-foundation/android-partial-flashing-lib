@@ -711,6 +711,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
             // TODO - check size of code in file matches micro:bit
 
+            boolean endOfFile = false;
             long startTime = SystemClock.elapsedRealtime();
             while (true) {
                 // Timeout if total is > 30 seconds
@@ -720,19 +721,30 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 }
 
                 // Check if EOF
-                if(hex.getRecordTypeFromIndex( dataPos.line + lineCount) != 0) {
-                    break;
+                if ( endOfFile || hex.getRecordTypeFromIndex( dataPos.line + lineCount) != 0) {
+                    if ( count == 0) {
+                        break;
+                    }
+                    endOfFile = true;
                 }
 
-                addrLo = hex.getRecordAddressFromIndex( dataPos.line + lineCount);
-                addrHi = hex.getSegmentAddress(dataPos.line + lineCount);
-                addr   = (long) addrLo + (long) addrHi * 256 * 256;
-
-                hexData = hex.getDataFromIndex( dataPos.line + lineCount);
-                if ( part + 32 > hexData.length()) {
-                    partData = hexData.substring( part);
+                if ( endOfFile) {
+                    // complete the batch of 4 packets with FF
+                    char[] c32 = new char[32];
+                    Arrays.fill( c32, 'F');
+                    hexData = new String( c32);
+                    partData = hexData;
                 } else {
-                    partData = hexData.substring(part, part + 32);
+                    addrLo = hex.getRecordAddressFromIndex(dataPos.line + lineCount);
+                    addrHi = hex.getSegmentAddress(dataPos.line + lineCount);
+                    addr = (long) addrLo + (long) addrHi * 256 * 256;
+
+                    hexData = hex.getDataFromIndex(dataPos.line + lineCount);
+                    if (part + 32 > hexData.length()) {
+                        partData = hexData.substring(part);
+                    } else {
+                        partData = hexData.substring(part, part + 32);
+                    }
                 }
 
                 int offsetToSend = 0;
@@ -748,7 +760,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     offsetToSend = addr0Hi;
                 }
 
-                logi( packetNum + " " + count + " addr0 " + addr0 + " offsetToSend " + offsetToSend + " line " + lineCount + " addr " + addr + " part " + part + " data " + partData);
+                logi( packetNum + " " + count + " addr0 " + addr0 + " offsetToSend " + offsetToSend + " line " + lineCount + " addr " + addr + " part " + part + " data " + partData + " endOfFile " + endOfFile);
 
                 // recordToByteArray() builds a PF command block with the data
                 byte[] chunk = HexUtils.recordToByteArray(partData, offsetToSend, packetNum);
@@ -792,12 +804,15 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 if(packetState == PACKET_STATE_RETRANSMIT) {
                     lineCount = line0;
                     part = part0;
+                    endOfFile = false;
                 } else {
-                    // Next part
-                    part = part + partData.length();
-                    if ( part >= hexData.length()) {
-                        part = 0;
-                        lineCount = lineCount + 1;
+                    if ( !endOfFile) {
+                        // Next part
+                        part = part + partData.length();
+                        if (part >= hexData.length()) {
+                            part = 0;
+                            lineCount = lineCount + 1;
+                        }
                     }
                 }
 
