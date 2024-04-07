@@ -62,6 +62,15 @@ public abstract class PartialFlashingBaseService extends IntentService {
     public static final String EXTRA_PROGRESS = "org.microbit.android.partialflashing.extra.EXTRA_PROGRESS";
     public static final String BROADCAST_PF_FAILED = "org.microbit.android.partialflashing.broadcast.BROADCAST_PF_FAILED";
     public static final String BROADCAST_PF_ATTEMPT_DFU = "org.microbit.android.partialflashing.broadcast.BROADCAST_PF_ATTEMPT_DFU";
+    public static final String BROADCAST_PF_ABORTED = "org.microbit.android.partialflashing.broadcast.BROADCAST_PF_ABORTED";
+    public static final String EXTRA_ACTION = "org.microbit.android.partialflashing.extra.EXTRA_ACTION";
+    public static final int ACTION_ABORT = 0;
+    public static final String EXTRA_DATA = "org.microbit.android.partialflashing.extra.EXTRA_DATA";
+    public static final int ERROR_CONNECT = 1;
+    public static final int ERROR_RECONNECT = 2;
+    public static final int ERROR_DFU_MODE = 3;
+
+    private boolean abortReceived = false;
 
     protected abstract Class<? extends Activity> getNotificationTarget();
 
@@ -73,7 +82,20 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private BroadcastReceiver broadcastReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, final Intent intent) {
-            logi( "Received Broadcast: " + intent.toString());
+            logi("Received Broadcast: " + intent.toString());
+            int extra = intent.getIntExtra(EXTRA_ACTION, -1);
+            switch (extra) {
+                case ACTION_ABORT:
+                    abortReceived = true;
+                    mConnectionState = STATE_ERROR;
+                    // Clear locks
+                    synchronized (lock) {
+                        lock.notifyAll();
+                    }
+                    break;
+                default:
+                    break;
+            }
         }
     };
 
@@ -84,6 +106,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         DEBUG = isDebug();
 
         logi( "onCreate");
+
+        abortReceived = false;
 
         // Create intent filter and add to Local Broadcast Manager so that we can use an Intent to
         // start the Partial Flashing Service
@@ -251,6 +275,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         for ( int i = 0; i < 3; i++) {
             mBluetoothGatt = connect(deviceAddress);
+            if ( checkAbort()) return;
             if (mBluetoothGatt != null)
                 break;
         }
@@ -272,12 +297,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     // But it doesn't seem to work in Android 8
                     cccEnable(serviceChangedCharacteristic(), false);
                     logi( "Reconnect");
-                    mBluetoothGatt.disconnect();
-                    lockWait(2000);
-                    mBluetoothGatt.close();
-                    mBluetoothGatt = null;
+                    disconnectAndClose();
+                    if ( checkAbort()) return;
 
                     mBluetoothGatt = connect(deviceAddress);
+                    if ( checkAbort()) return;
                     if (mBluetoothGatt == null) {
                         logi( "Failed to connect");
                         logi( "Send Intent: DFU_BROADCAST_ERROR");
@@ -296,6 +320,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         if ( isV1) {
             refreshV1ForMicroBitDfu();
         }
+
+        if ( checkAbort()) return;
 
         int pfResult = PF_ATTEMPT_DFU;
         if ( pf) {
@@ -333,13 +359,9 @@ public abstract class PartialFlashingBaseService extends IntentService {
             }
         }
 
-        logi( "disconnect");
-        mBluetoothGatt.disconnect();
-        lockWait( 2000);
-        mBluetoothGatt.close();
-        mBluetoothGatt = null;
+        disconnectAndClose();
 
-        if ( isV1 && action == BROADCAST_PF_ATTEMPT_DFU) {
+        if (isV1 && action.equals(BROADCAST_PF_ATTEMPT_DFU)) {
             // Try to ensure the NordicDfu profile
             for ( int i = 0; i < 5; i++) {
                 mBluetoothGatt = connect(deviceAddress);
@@ -350,10 +372,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
             if ( mBluetoothGatt != null) {
                 refreshV1ForNordicDfu();
-                mBluetoothGatt.disconnect();
-                lockWait(2000);
-                mBluetoothGatt.close();
-                mBluetoothGatt = null;
+                disconnectAndClose();
             }
         }
 
@@ -363,6 +382,28 @@ public abstract class PartialFlashingBaseService extends IntentService {
             LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
         }
         logi( "partialFlash End");
+    }
+
+    @SuppressLint("MissingPermission")
+    private void disconnectAndClose() {
+        if ( mBluetoothGatt != null) {
+            logi("disconnect");
+            mBluetoothGatt.disconnect();
+            lockWait(2000);
+            mBluetoothGatt.close();
+            mBluetoothGatt = null;
+        }
+    }
+
+    private boolean checkAbort() {
+        if ( !abortReceived) {
+            return false;
+        }
+        disconnectAndClose();
+        logi("Send Intent: " + BROADCAST_PF_ABORTED);
+        final Intent broadcast = new Intent(BROADCAST_PF_ABORTED);
+        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+        return true;
     }
 
     // Various callback methods defined by the BLE API.
@@ -1170,6 +1211,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     default:
                         logi( time + ": " + mConnectionState);
                         break;
+                }
+
+                if ( abortReceived) {
+                    mConnectionState = STATE_ERROR;
                 }
 
                 waiting = false;
