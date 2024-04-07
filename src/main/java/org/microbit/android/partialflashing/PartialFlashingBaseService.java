@@ -54,7 +54,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
     // ================================================================
     // INTENT SERVICE
 
-    public static final String DFU_BROADCAST_ERROR = "no.nordicsemi.android.dfu.broadcast.BROADCAST_ERROR";
+    public static final String BROADCAST_ERROR = "org.microbit.android.partialflashing.broadcast.BROADCAST_ERROR";
     public static final String BROADCAST_ACTION = "org.microbit.android.partialflashing.broadcast.BROADCAST_ACTION";
     public static final String BROADCAST_PROGRESS = "org.microbit.android.partialflashing.broadcast.BROADCAST_PROGRESS";
     public static final String BROADCAST_START = "org.microbit.android.partialflashing.broadcast.BROADCAST_START";
@@ -282,8 +282,9 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         if (mBluetoothGatt == null) {
             logi( "Failed to connect");
-            logi( "Send Intent: DFU_BROADCAST_ERROR");
-            final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
+            logi( "Send Intent: BROADCAST_ERROR");
+            final Intent broadcast = new Intent(BROADCAST_ERROR);
+            broadcast.putExtra(EXTRA_DATA, ERROR_CONNECT);
             LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
             return;
         }
@@ -304,8 +305,9 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     if ( checkAbort()) return;
                     if (mBluetoothGatt == null) {
                         logi( "Failed to connect");
-                        logi( "Send Intent: DFU_BROADCAST_ERROR");
-                        final Intent broadcast = new Intent(DFU_BROADCAST_ERROR);
+                        logi( "Send Intent: BROADCAST_ERROR");
+                        final Intent broadcast = new Intent(BROADCAST_ERROR);
+                        broadcast.putExtra(EXTRA_DATA, ERROR_RECONNECT);
                         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
                         return;
                     }
@@ -332,6 +334,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
         }
 
         String action = "";
+        int extra = 0;
 
         switch ( pfResult) {
             case PF_FAILED: {
@@ -348,7 +351,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 if( isV1) {
                     if ( !enterDFUModeV1()) {
                         logi( "Failed to enter DFU mode");
-                        action = DFU_BROADCAST_ERROR;
+                        action = BROADCAST_ERROR;
+                        extra = ERROR_DFU_MODE;
                     }
                 }
                 break;
@@ -379,6 +383,9 @@ public abstract class PartialFlashingBaseService extends IntentService {
         if ( !action.isEmpty()) {
             logi( "Send Intent: " + action);
             final Intent broadcast = new Intent(action);
+            if ( action.equals(BROADCAST_ERROR)) {
+                broadcast.putExtra(EXTRA_DATA, extra);
+            }
             LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
         }
         logi( "partialFlash End");
