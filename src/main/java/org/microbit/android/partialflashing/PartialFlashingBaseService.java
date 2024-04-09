@@ -87,7 +87,6 @@ public abstract class PartialFlashingBaseService extends IntentService {
             switch (extra) {
                 case ACTION_ABORT:
                     abortReceived = true;
-                    mConnectionState = STATE_ERROR;
                     // Clear locks
                     synchronized (lock) {
                         lock.notifyAll();
@@ -158,6 +157,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         final boolean pf = intent.getBooleanExtra("pf", true);
 
         partialFlash( filePath, deviceAddress, pf);
+
+        checkAbort();
         logi("onHandleIntent END");
     }
 
@@ -275,7 +276,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         for ( int i = 0; i < 3; i++) {
             mBluetoothGatt = connect(deviceAddress);
-            if ( checkAbort()) return;
+            if ( abortReceived) return;
             if (mBluetoothGatt != null)
                 break;
         }
@@ -299,10 +300,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     cccEnable(serviceChangedCharacteristic(), false);
                     logi( "Reconnect");
                     disconnectAndClose();
-                    if ( checkAbort()) return;
+                    if ( abortReceived) return;
 
                     mBluetoothGatt = connect(deviceAddress);
-                    if ( checkAbort()) return;
+                    if ( abortReceived) return;
                     if (mBluetoothGatt == null) {
                         logi( "Failed to connect");
                         logi( "Send Intent: BROADCAST_ERROR");
@@ -323,7 +324,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
             refreshV1ForMicroBitDfu();
         }
 
-        if ( checkAbort()) return;
+        if ( abortReceived) return;
 
         int pfResult = PF_ATTEMPT_DFU;
         if ( pf) {
