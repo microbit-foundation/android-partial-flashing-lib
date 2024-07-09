@@ -45,8 +45,9 @@ import java.util.zip.CRC32;
 public abstract class PartialFlashingBaseService extends IntentService {
     private final static String TAG = PartialFlashingBaseService.class.getSimpleName();
     private static boolean DEBUG = false;
+
     public void logi(String message) {
-        if( DEBUG) {
+        if (DEBUG) {
             Log.i(TAG, "### " + Thread.currentThread().getId() + " # " + message);
         }
     }
@@ -69,8 +70,12 @@ public abstract class PartialFlashingBaseService extends IntentService {
     public static final int ERROR_CONNECT = 1;
     public static final int ERROR_RECONNECT = 2;
     public static final int ERROR_DFU_MODE = 3;
+    public static final int ERROR_BONDED = 4;
+    public static final int ERROR_BROKEN = 5;
 
     private boolean abortReceived = false;
+    private Boolean working = false;
+    private boolean wasNotBonded = false;
 
     protected abstract Class<? extends Activity> getNotificationTarget();
 
@@ -83,17 +88,70 @@ public abstract class PartialFlashingBaseService extends IntentService {
         @Override
         public void onReceive(Context context, final Intent intent) {
             logi("Received Broadcast: " + intent.toString());
-            int extra = intent.getIntExtra(EXTRA_ACTION, -1);
-            switch (extra) {
-                case ACTION_ABORT:
-                    abortReceived = true;
-                    // Clear locks
-                    synchronized (lock) {
-                        lock.notifyAll();
-                    }
-                    break;
-                default:
-                    break;
+            String action = intent.getAction();
+
+            if (PartialFlashingBaseService.BROADCAST_ACTION.equals(action)) {
+                int extra = intent.getIntExtra(EXTRA_ACTION, -1);
+                switch (extra) {
+                    case ACTION_ABORT:
+                        abortReceived = true;
+                        // Clear locks
+                        synchronized (lock) {
+                            lock.notifyAll();
+                        }
+                        break;
+                    default:
+                        break;
+                }
+            } else if (BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(action)) {
+                if (!working) {
+                    return;
+                }
+                if (mBluetoothGatt == null) {
+                    return;
+                }
+                if (mBluetoothGatt.getDevice() == null) {
+                    return;
+                }
+                if (mBluetoothGatt.getDevice().getAddress() == null) {
+                    return;
+                }
+
+                final BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (device == null) {
+                    Log.e(TAG, "bondStateReceiver - no device");
+                    return;
+                }
+                final String address = device.getAddress();
+                if (address == null) {
+                    Log.e(TAG, "bondStateReceiver - no address");
+                    return;
+                }
+                final int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR);
+                final int prevState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR);
+                logi("bondStateReceiver -" + " address = " + address + " state = " + state + " prevState = " + prevState);
+                // Check the changed device is the one we are trying to pair
+                if (!address.equals(mBluetoothGatt.getDevice().getAddress())) {
+                    return;
+                }
+                if (state != BluetoothDevice.BOND_BONDED && prevState != BluetoothDevice.BOND_BONDED) {
+                    wasNotBonded = true;
+                }
+                switch (state) {
+                    case BluetoothDevice.BOND_BONDED:
+                        mConnectionState = STATE_BONDED_DISCONNECT;
+                        mWaitingForBonding = false;
+                        // Clear locks
+                        synchronized (lock) {
+                            lock.notifyAll();
+                        }
+                        break;
+                    case BluetoothDevice.BOND_BONDING:
+                        mWaitingForBonding = true;
+                        break;
+                    case BluetoothDevice.BOND_NONE:
+                        break;
+                }
             }
         }
     };
@@ -104,7 +162,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         DEBUG = isDebug();
 
-        logi( "onCreate");
+        logi("onCreate");
 
         abortReceived = false;
 
@@ -113,6 +171,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         final IntentFilter intentFilter = new IntentFilter();
         intentFilter.addAction(PartialFlashingBaseService.BROADCAST_ACTION);
+        intentFilter.addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
 
         final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
         manager.registerReceiver(broadcastReceiver, intentFilter);
@@ -123,40 +182,40 @@ public abstract class PartialFlashingBaseService extends IntentService {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        logi( "onDestroy");
+        logi("onDestroy");
         final LocalBroadcastManager manager = LocalBroadcastManager.getInstance(this);
         manager.unregisterReceiver(broadcastReceiver);
     }
 
     private void sendProgressBroadcast(final int progress) {
-        logi( "Sending progress broadcast: " + progress + "%");
+        logi("Sending progress broadcast: " + progress + "%");
         final Intent broadcast = new Intent(BROADCAST_PROGRESS);
         broadcast.putExtra(EXTRA_PROGRESS, progress);
         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
     }
 
     private void sendProgressBroadcastStart() {
-        logi( "Sending progress broadcast start");
+        logi("Sending progress broadcast start");
         final Intent broadcast = new Intent(BROADCAST_START);
         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
     }
 
     private void sendProgressBroadcastComplete() {
-        logi( "Sending progress broadcast complete");
+        logi("Sending progress broadcast complete");
         final Intent broadcast = new Intent(BROADCAST_COMPLETE);
         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
     }
 
     @Override
     protected void onHandleIntent(@Nullable Intent intent) {
-        logi( "onHandleIntent");
+        logi("onHandleIntent");
 
         final String filePath = intent.getStringExtra("filepath");
         final String deviceAddress = intent.getStringExtra("deviceAddress");
         final int hardwareType = intent.getIntExtra("hardwareType", 1);
         final boolean pf = intent.getBooleanExtra("pf", true);
 
-        partialFlash( filePath, deviceAddress, pf);
+        partialFlash(filePath, deviceAddress, pf);
 
         checkAbort();
         logi("onHandleIntent END");
@@ -168,7 +227,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
      * @return <code>true</code> if initialization was successful
      */
     private boolean initialize() {
-        logi( "initialize");
+        logi("initialize");
         // For API level 18 and above, get a reference to BluetoothAdapter through
         // BluetoothManager.
         final BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
@@ -209,11 +268,12 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private final static int BLE_PENDING = -1;
     private final static int BLE_ERROR_UNKNOWN = Integer.MAX_VALUE;
 
-    private BluetoothManager mBluetoothManager;
     private BluetoothAdapter mBluetoothAdapter;
     private BluetoothGatt mBluetoothGatt = null;
     private int mConnectionState = STATE_DISCONNECTED;
     private boolean mWaitingForServices = false;
+    private boolean mWaitingForBonding = false;
+
     private boolean descriptorWriteSuccess = false;
     BluetoothGattDescriptor descriptorRead = null;
     boolean descriptorReadSuccess = false;
@@ -228,8 +288,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private final Object region_lock = new Object();
 
     private static final byte PACKET_STATE_WAITING = 0;
-    private static final byte PACKET_STATE_SENT = (byte)0xFF;
-    private static final byte PACKET_STATE_RETRANSMIT = (byte)0xAA;
+    private static final byte PACKET_STATE_SENT = (byte) 0xFF;
+    private static final byte PACKET_STATE_RETRANSMIT = (byte) 0xAA;
     private static final byte PACKET_STATE_COMPLETE_FLASH = (byte) 0xCF;
 
     private byte packetState = PACKET_STATE_WAITING;
@@ -237,12 +297,16 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final int STATE_DISCONNECTED = 0;
     private static final int STATE_CONNECTING = 1;
     private static final int STATE_CONNECTED = 2;
-    private static final int STATE_CONNECTED_AND_READY = 3;
-    private static final int STATE_ERROR = 4;
+    private static final int STATE_DISCOVERED = 3;
+    private static final int STATE_READY = 4;
+    private static final int STATE_BONDED_DISCONNECT = 5;
+    private static final int STATE_BONDED = 6;
+    private static final int STATE_ERROR = 7;
+    private static final int STATE_RETRY = 8;
 
     private static final UUID GENERIC_ATTRIBUTE_SERVICE_UUID = UUID.fromString("00001801-0000-1000-8000-00805F9B34FB");
-    private static final UUID SERVICE_CHANGED_UUID           = UUID.fromString("00002A05-0000-1000-8000-00805F9B34FB");
-    private static final UUID CLIENT_CHARACTERISTIC_CONFIG   = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
+    private static final UUID SERVICE_CHANGED_UUID = UUID.fromString("00002A05-0000-1000-8000-00805F9B34FB");
+    private static final UUID CLIENT_CHARACTERISTIC_CONFIG = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
     // Regions
     private static final int REGION_SD = 0;
@@ -271,87 +335,113 @@ public abstract class PartialFlashingBaseService extends IntentService {
     private static final int PF_FAILED = 0x2;
 
     @SuppressLint("MissingPermission")
-    private void partialFlash( final String filePath, final String deviceAddress, final boolean pf) {
-        logi( "partialFlash");
+    private void partialFlash(final String filePath, final String deviceAddress, final boolean pf) {
+        logi("partialFlash");
 
-        for ( int i = 0; i < 3; i++) {
+        for (int i = 0; i < 3; i++) {
             mBluetoothGatt = connect(deviceAddress);
-            if ( abortReceived) return;
+            if (abortReceived)
+                return;
             if (mBluetoothGatt != null)
+                break;
+            if (mConnectionState == STATE_ERROR)
+                break;
+            if (mConnectionState == STATE_BONDED)
+                break;
+            if (mConnectionState == STATE_CONNECTING)
                 break;
         }
 
         if (mBluetoothGatt == null) {
-            logi( "Failed to connect");
-            logi( "Send Intent: BROADCAST_ERROR");
+            logi("Failed to connect");
+            logi("Send Intent: BROADCAST_ERROR");
             final Intent broadcast = new Intent(BROADCAST_ERROR);
-            broadcast.putExtra(EXTRA_DATA, ERROR_CONNECT);
+            if (mConnectionState == STATE_BONDED) {
+                broadcast.putExtra(EXTRA_DATA, ERROR_BONDED);
+            } else {
+                broadcast.putExtra(EXTRA_DATA, ERROR_CONNECT);
+            }
             LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
             return;
         }
 
-        logi( "Connected");
-        if ( Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        logi("Connected");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             if (serviceChangedCharacteristic() != null) {
                 if (!cccEnabled(serviceChangedCharacteristic(), false)) {
+                    if (stateIsError()) {
+                        return;
+                    }
                     // Only seem to get here with V1
                     // After this, the refresh function is never called
                     // But it doesn't seem to work in Android 8
                     cccEnable(serviceChangedCharacteristic(), false);
-                    logi( "Reconnect");
+                    if (stateIsError()) {
+                        return;
+                    }
+                    logi("Reconnect");
                     disconnectAndClose();
-                    if ( abortReceived) return;
+                    if (abortReceived) return;
 
                     mBluetoothGatt = connect(deviceAddress);
-                    if ( abortReceived) return;
+                    if (abortReceived) return;
                     if (mBluetoothGatt == null) {
-                        logi( "Failed to connect");
-                        logi( "Send Intent: BROADCAST_ERROR");
+                        logi("Failed to connect");
+                        logi("Send Intent: BROADCAST_ERROR");
                         final Intent broadcast = new Intent(BROADCAST_ERROR);
                         broadcast.putExtra(EXTRA_DATA, ERROR_RECONNECT);
                         LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
                         return;
                     }
                     if (!cccEnabled(serviceChangedCharacteristic(), false)) {
+                        if (stateIsError()) {
+                            return;
+                        }
                         cccEnable(serviceChangedCharacteristic(), false);
+                        if (stateIsError()) {
+                            return;
+                        }
                     }
                 }
             }
         }
 
         boolean isV1 = connectedHasV1Dfu();
-        if ( isV1) {
+        if (isV1) {
             refreshV1ForMicroBitDfu();
         }
 
-        if ( abortReceived) return;
+        if (abortReceived) return;
+        if (stateIsError()) {
+            return;
+        }
 
         int pfResult = PF_ATTEMPT_DFU;
-        if ( pf) {
-            logi( "Trying to partial flash");
-            if ( partialFlashCharacteristicCheck()) {
-                pfResult = attemptPartialFlash( filePath);
+        if (pf) {
+            logi("Trying to partial flash");
+            if (partialFlashCharacteristicCheck()) {
+                pfResult = attemptPartialFlash(filePath);
             }
         }
 
         String action = "";
         int extra = 0;
 
-        switch ( pfResult) {
+        switch (pfResult) {
             case PF_FAILED: {
                 // Partial flashing started but failed. Need to PF or USB flash to fix
-                logi( "Partial flashing failed");
-                logi( "Send Intent: BROADCAST_PF_FAILED");
+                logi("Partial flashing failed");
+                logi("Send Intent: BROADCAST_PF_FAILED");
                 action = BROADCAST_PF_FAILED;
                 break;
             }
             case PF_ATTEMPT_DFU: {
-                logi( "Attempt DFU");
+                logi("Attempt DFU");
                 action = BROADCAST_PF_ATTEMPT_DFU;
                 // If v1 we need to switch the DFU mode
-                if( isV1) {
-                    if ( !enterDFUModeV1()) {
-                        logi( "Failed to enter DFU mode");
+                if (isV1) {
+                    if (!enterDFUModeV1()) {
+                        logi("Failed to enter DFU mode");
                         action = BROADCAST_ERROR;
                         extra = ERROR_DFU_MODE;
                     }
@@ -359,7 +449,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 break;
             }
             case PF_SUCCESS: {
-                logi( "Partial flashing succeeded");
+                logi("Partial flashing succeeded");
                 break;
             }
         }
@@ -368,33 +458,50 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         if (isV1 && action.equals(BROADCAST_PF_ATTEMPT_DFU)) {
             // Try to ensure the NordicDfu profile
-            for ( int i = 0; i < 5; i++) {
+            for (int i = 0; i < 5; i++) {
                 mBluetoothGatt = connect(deviceAddress);
-                if ( mBluetoothGatt != null)
+                if (mBluetoothGatt != null)
                     break;
-                lockWait( 1000);
+                lockWait(1000);
             }
 
-            if ( mBluetoothGatt != null) {
+            if (mBluetoothGatt != null) {
                 refreshV1ForNordicDfu();
                 disconnectAndClose();
             }
         }
 
-        if ( !action.isEmpty()) {
-            logi( "Send Intent: " + action);
+        if (!action.isEmpty()) {
+            logi("Send Intent: " + action);
             final Intent broadcast = new Intent(action);
-            if ( action.equals(BROADCAST_ERROR)) {
+            if (action.equals(BROADCAST_ERROR)) {
                 broadcast.putExtra(EXTRA_DATA, extra);
             }
             LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
         }
-        logi( "partialFlash End");
+        logi("partialFlash End");
+    }
+
+    private boolean stateIsError() {
+        if (mConnectionState == STATE_READY) {
+            return false;
+        }
+        logi("stateIsError");
+        final Intent broadcast = new Intent(BROADCAST_ERROR);
+        if (mConnectionState == STATE_BONDED) {
+            broadcast.putExtra(EXTRA_DATA, ERROR_BONDED);
+        } else {
+            broadcast.putExtra(EXTRA_DATA, ERROR_BROKEN);
+        }
+        disconnectAndClose();
+        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+        return true;
     }
 
     @SuppressLint("MissingPermission")
     private void disconnectAndClose() {
-        if ( mBluetoothGatt != null) {
+        working = false;
+        if (mBluetoothGatt != null) {
             logi("disconnect");
             mBluetoothGatt.disconnect();
             lockWait(2000);
@@ -404,7 +511,7 @@ public abstract class PartialFlashingBaseService extends IntentService {
     }
 
     private boolean checkAbort() {
-        if ( !abortReceived) {
+        if (!abortReceived) {
             return false;
         }
         disconnectAndClose();
@@ -420,10 +527,38 @@ public abstract class PartialFlashingBaseService extends IntentService {
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status,
                                             int newState) {
+            if ( !working) {
+                logi("Not working");
+                return;
+            }
+            
+            if ( gatt.getDevice().getBondState() != BluetoothDevice.BOND_BONDED) {
+                wasNotBonded = true;
+            }
+            
             logi( "onConnectionStateChange " + newState + " status " + status);
-            if ( status != 0) {
-                logi("ERROR - status");
-                mConnectionState = STATE_ERROR;
+
+            if ( status != BluetoothGatt.GATT_SUCCESS) {
+                if ( mConnectionState == STATE_BONDED_DISCONNECT) {
+                    Log.i(TAG, "Disconnect error after bonding");
+                    lockWait(300);
+                    mConnectionState = STATE_BONDED;
+                } else if ( mWaitingForBonding) {
+                    if ( gatt.getDevice().getBondState() == BluetoothDevice.BOND_BONDED) {
+                        Log.i(TAG, "Disconnect while waiting for bonding");
+                        lockWait(300);
+                        mConnectionState = STATE_BONDED;
+                    } else {
+                        logi("ERROR while connecting - Prepare for retry after a short delay");
+                        mConnectionState = STATE_RETRY;
+                    }
+                } else if ( mConnectionState == STATE_CONNECTING) {
+                    logi("ERROR while connecting - Prepare for retry after a short delay");
+                    mConnectionState = STATE_RETRY;
+                } else {
+                    logi("ERROR after connected - fail");
+                    mConnectionState = STATE_ERROR;
+                }
                 // Clear locks
                 synchronized (lock) {
                     lock.notifyAll();
@@ -435,25 +570,35 @@ public abstract class PartialFlashingBaseService extends IntentService {
                 logi( "STATE_CONNECTED");
 
                 mConnectionState = STATE_CONNECTED;
-
-                /* Taken from Nordic. See reasoning here: https://github.com/NordicSemiconductor/Android-DFU-Library/blob/e0ab213a369982ae9cf452b55783ba0bdc5a7916/dfu/src/main/java/no/nordicsemi/android/dfu/DfuBaseService.java#L888 */
-                if (gatt.getDevice().getBondState() == BluetoothDevice.BOND_BONDED) {
-                    logi( "Wait for service changed");
-                    lockWait(1600);
-                    logi( "Bond timeout");
-                    // NOTE: This also works with shorter waiting time. The gatt.discoverServices() must be called after the indication is received which is
-                    // about 600ms after establishing connection. Values 600 - 1600ms should be OK.
-                }
-                logi( "Calling gatt.discoverServices()");
-                mWaitingForServices = true;
-                final boolean success = gatt.discoverServices();
-                if (!success) {
-                    Log.e(TAG,"ERROR_SERVICE_DISCOVERY_NOT_STARTED");
-                    mConnectionState = STATE_ERROR;
+                
+                switch ( gatt.getDevice().getBondState()) {
+                    case BluetoothDevice.BOND_BONDED:
+                        /* Taken from Nordic. See reasoning here: https://github.com/NordicSemiconductor/Android-DFU-Library/blob/e0ab213a369982ae9cf452b55783ba0bdc5a7916/dfu/src/main/java/no/nordicsemi/android/dfu/DfuBaseService.java#L888 */
+                        // NOTE: This also works with shorter waiting time. The gatt.discoverServices() must be called after the indication is received which is
+                        // about 600ms after establishing connection. Values 600 - 1600ms should be OK.
+                        logi( "Already bonded - Wait for service changed");
+                        lockWait(1600);
+                        logi( "Already bonded - timeout");
+                        callDiscoverServices( gatt);
+                        break;
+                    case BluetoothDevice.BOND_BONDING:
+                        logi( "BOND_BONDING");
+                        mWaitingForBonding = true;
+                        break;
+                    case BluetoothDevice.BOND_NONE:
+                        logi( "BOND_NONE");
+                        callDiscoverServices( gatt);
+                        break;
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                mConnectionState = STATE_DISCONNECTED;
-                Log.i(TAG, "Disconnected from GATT server.");
+                if ( mConnectionState == STATE_BONDED_DISCONNECT) {
+                    Log.i(TAG, "Disconnect error after bonding");
+                    lockWait(300);
+                    mConnectionState = STATE_BONDED;
+                } else {
+                    Log.i(TAG, "Disconnected from GATT server.");
+                    mConnectionState = STATE_DISCONNECTED;
+                }
             }
 
             // Clear any locks
@@ -462,11 +607,16 @@ public abstract class PartialFlashingBaseService extends IntentService {
             }
         }
 
+        @SuppressLint("MissingPermission")
         @Override
         // New services discovered
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
             logi("onServicesDiscovered status " + status);
-            if ( status != 0) {
+            if ( !working) {
+                return;
+            }
+            
+            if ( status != BluetoothGatt.GATT_SUCCESS) {
                 logi("ERROR - status");
                 mConnectionState = STATE_ERROR;
                 // Clear locks
@@ -485,7 +635,30 @@ public abstract class PartialFlashingBaseService extends IntentService {
                     hardwareType = MICROBIT_V1;
                 }
                 mWaitingForServices = false;
-                mConnectionState = STATE_CONNECTED_AND_READY;
+
+                mConnectionState = STATE_DISCOVERED;
+
+                switch ( gatt.getDevice().getBondState()) {
+                    case BluetoothDevice.BOND_BONDED:
+                        logi( "Already bonded - READY");
+                        mConnectionState = STATE_READY;
+                        break;
+                    case BluetoothDevice.BOND_BONDING:
+                        logi( "BOND_BONDING");
+                        mWaitingForBonding = true;
+                        break;
+                    case BluetoothDevice.BOND_NONE:
+                        logi( "BOND_NONE");
+                        //TODO: access characteristic to initiate bonding
+                        logi("Call createBond()");
+                        boolean started = mBluetoothGatt.getDevice().createBond();
+                        if (!started) {
+                            logi("createBond() failed");
+                            mConnectionState = STATE_ERROR;
+                        }
+                        break;
+                }
+
                 // Clear locks
                 synchronized (lock) {
                     lock.notifyAll();
@@ -629,6 +802,18 @@ public abstract class PartialFlashingBaseService extends IntentService {
             }
         }
     };
+
+    @SuppressLint("MissingPermission")
+    private boolean callDiscoverServices( BluetoothGatt gatt) {
+        logi( "callDiscoverServices");
+        mWaitingForServices = true;
+        final boolean success = gatt.discoverServices();
+        if (!success) {
+            Log.e(TAG,"ERROR_SERVICE_DISCOVERY_NOT_STARTED");
+            mConnectionState = STATE_ERROR;
+        }
+        return success;
+    }
 
     /**
      * Wait for up to 15ms for onWriteCharacteristic to be called
@@ -1159,8 +1344,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
         long start = SystemClock.elapsedRealtime();
 
+        working = true;
         mConnectionState = STATE_CONNECTING;
         mWaitingForServices = false;
+        mWaitingForBonding = false;
         int stateWas = mConnectionState;
 
         final BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(address);
@@ -1186,7 +1373,8 @@ public abstract class PartialFlashingBaseService extends IntentService {
         }
 
         if ( gatt == null) {
-            mConnectionState = STATE_ERROR;
+            mConnectionState = STATE_RETRY;
+            working = false;
             return null;
         }
 
@@ -1194,18 +1382,38 @@ public abstract class PartialFlashingBaseService extends IntentService {
         // Connection error may occur as well.
         try {
             boolean waiting = true;
-            while ( waiting && mConnectionState != STATE_CONNECTED_AND_READY) {
+            while ( waiting && mConnectionState != STATE_READY) {
+
+                int timeout = 20000;
+                if ( mConnectionState == STATE_BONDED_DISCONNECT) {
+                    timeout = 6000;
+                } else if ( mWaitingForBonding) {
+                    timeout = 30000;
+                }
+
                 synchronized (lock) {
-                    lock.wait(20000);
+                    lock.wait( timeout);
                 }
 
                 String time = Float.toString((float) ( SystemClock.elapsedRealtime() - start) / 1000.0f);
                 switch ( mConnectionState) {
-                    case STATE_CONNECTED_AND_READY:
-                        logi( time + ": STATE_CONNECTED_AND_READY");
+                    case STATE_DISCOVERED:
+                        logi( time + ": STATE_DISCOVERED");
+                        break;
+                    case STATE_READY:
+                        logi( time + ": STATE_READY");
                         break;
                     case STATE_ERROR:
                         logi( time + ": STATE_ERROR");
+                        break;
+                    case STATE_RETRY:
+                        logi( time + ": STATE_RETRY");
+                        break;
+                    case STATE_BONDED:
+                        logi( time + ": STATE_BONDED");
+                        break;
+                    case STATE_BONDED_DISCONNECT:
+                        logi( time + ": STATE_BONDED_DISCONNECT");
                         break;
                     case STATE_CONNECTED:
                         logi( time + ": STATE_CONNECTED");
@@ -1227,9 +1435,11 @@ public abstract class PartialFlashingBaseService extends IntentService {
 
                 waiting = false;
                 switch ( mConnectionState) {
-                    case STATE_CONNECTED_AND_READY:
+                    case STATE_READY:
                     case STATE_DISCONNECTED:
                     case STATE_ERROR:
+                    case STATE_RETRY:
+                    case STATE_BONDED:
                         break;
                     default:
                         if ( stateWas != mConnectionState)
@@ -1242,8 +1452,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
             mConnectionState = STATE_ERROR;
         }
 
-        if ( mConnectionState != STATE_CONNECTED_AND_READY) {
+        if ( mConnectionState != STATE_READY) {
+            working = false;
             gatt.disconnect();
+            lockWait(2000);
             gatt.close();
             return null;
         }
@@ -1265,6 +1477,13 @@ public abstract class PartialFlashingBaseService extends IntentService {
             }
         }
         return true;
+    }
+
+    private void lockNotify() {
+        // Clear locks
+        synchronized (lock) {
+            lock.notifyAll();
+        }
     }
 
     private boolean connectedHasV1MicroBitDfu() {
