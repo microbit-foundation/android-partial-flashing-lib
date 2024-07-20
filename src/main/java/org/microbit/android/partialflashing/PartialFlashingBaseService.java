@@ -651,8 +651,10 @@ public abstract class PartialFlashingBaseService extends IntentService {
                         logi( "BOND_NONE");
                         //TODO: access characteristic to initiate bonding
                         logi("Call createBond()");
-                        boolean started = mBluetoothGatt.getDevice().createBond();
+                        mWaitingForBonding = true;
+                        boolean started = gatt.getDevice().createBond();
                         if (!started) {
+                            mWaitingForBonding = false;
                             logi("createBond() failed");
                             mConnectionState = STATE_ERROR;
                         }
